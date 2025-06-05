@@ -25,8 +25,8 @@ API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER', '')
 TWO_FACTOR_PASSWORD = os.getenv('TWO_FACTOR_PASSWORD', '')
-SESSION_PATH = os.getenv('SESSION_PATH', '/opt/render/project/data/bot_session')
-DB_PATH = os.getenv('DB_PATH', '/opt/render/project/data/moderators.db')
+SESSION_PATH = os.getenv('SESSION_PATH', 'bot_session')
+DB_PATH = os.getenv('DB_PATH', 'moderators.db')
 AUDIO_PATH = os.getenv('AUDIO_PATH', 'QuantRP - ПРОЩАВАЙ.mp3')
 
 # Ініціалізація Telethon клієнта
