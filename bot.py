@@ -12,6 +12,7 @@ import datetime
 from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
+import os.path
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -430,9 +431,28 @@ async def kick_user(message: types.Message):
         return
 
     user_id, username = user_data
+    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+
+    # Надсилаємо музику перед кік
+    audio_path = 'kick_music.mp3'
+    if os.path.exists(audio_path):
+        try:
+            await bot.send_audio(
+                chat_id=message.chat.id,
+                audio=types.FSInputFile(audio_path),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵"),
+                parse_mode="MarkdownV2"
+            )
+            logger.info(f"Надіслано музику перед кік для user_id={user_id} у чаті {message.chat.id}")
+            await asyncio.sleep(25)  # Затримка, щоб музика встигла відобразитися
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
+    else:
+        logger.warning(f"Аудіофайл {audio_path} не знайдено")
+
+    # Виконуємо кік
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
-        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
         text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
@@ -521,10 +541,29 @@ async def ban_user(message: types.Message):
         return
 
     user_id, username = user_data
+    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+
+    # Надсилаємо музику перед бан
+    audio_path = 'kick_music.mp3'
+    if os.path.exists(audio_path):
+        try:
+            await bot.send_audio(
+                chat_id=message.chat.id,
+                audio=types.FSInputFile(audio_path),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
+                parse_mode="MarkdownV2"
+            )
+            logger.info(f"Надіслано музику перед бан для user_id={user_id} у чаті {message.chat.id}")
+            await asyncio.sleep(25)  # Затримка, щоб музика встигла відобразитися
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
+    else:
+        logger.warning(f"Аудіофайл {audio_path} не знайдено")
+
+    # Виконуємо бан
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         add_ban(user_id, message.chat.id, reason)
-        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
         text = escape_markdown_v2(f"Користувач {mention} забанений. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
@@ -533,7 +572,7 @@ async def ban_user(message: types.Message):
         logger.info(f"Забанено користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при бану користувача {user_id}: {e}")
-        reply = await message.reply(f"Не вдалося забанити користувача: {e.message}")
+        reply = await message.reply(f"Не вдалося забанить користувача: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -776,7 +815,7 @@ async def make_announcement(message: types.Message):
                     disable_notification=True
                 )
                 logger.info(f"Надіслано додаткове повідомлення з {len(chunk)} згадками в чаті {chat_id}")
-                await asyncio.sleep(1)  # Затримка, щоб уникнути обмежень Telegram
+                await asyncio.sleep(4)  # Затримка 4 секунди, щоб уникнути обмежень Telegram
 
         await safe_delete_message(message)
     except TelegramBadRequest as e:
@@ -785,6 +824,7 @@ async def make_announcement(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.chat_member()
 async def welcome_new_member(update: ChatMemberUpdated):
@@ -796,7 +836,9 @@ async def welcome_new_member(update: ChatMemberUpdated):
             (update.old_chat_member is None or old_status in ["left", "kicked"])):
         try:
             mention = await get_user_mention(user.id, update.chat.id) or f"User {user.id}"
-            text = escape_markdown_v2(f"Вітаємо, {mention}! Ласкаво просимо до нашого чату! 😊")
+            chat = await bot.get_chat(update.chat.id)
+            chat_username = f"@{chat.username}" if chat.username else f"ID:{update.chat.id}"
+            text = escape_markdown_v2(f"Вітаємо, {mention}! Ласкаво просимо до {chat_username}! 😊")
             await bot.send_message(
                 chat_id=update.chat.id,
                 text=text,
