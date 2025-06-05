@@ -12,7 +12,6 @@ import datetime
 from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
-import os.path
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,19 +20,22 @@ logger = logging.getLogger(__name__)
 # Завантаження змінних з .env
 load_dotenv()
 API_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv('ADMIN_IDS', '').split(',') if admin_id]
+ADMIN_IDS = [int(admin_id) for admin_id in os.getenv('ADMIN_IDS', '').split(',') if admin_id.strip()]
 API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER', '')
 TWO_FACTOR_PASSWORD = os.getenv('TWO_FACTOR_PASSWORD', '')
+SESSION_PATH = os.getenv('SESSION_PATH', '/opt/render/project/data/bot_session')
+DB_PATH = os.getenv('DB_PATH', '/opt/render/project/data/moderators.db')
+AUDIO_PATH = os.getenv('AUDIO_PATH', 'QuantRP - ПРОЩАВАЙ.mp3')
 
 # Ініціалізація Telethon клієнта
-telethon_client = TelegramClient('bot_session', API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
+telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
 
 # Ініціалізація бази даних SQLite
 def init_db():
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS moderators (
@@ -75,12 +77,13 @@ def init_db():
     except sqlite3.Error as e:
         logger.error(f"Помилка ініціалізації бази даних: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Завантаження модераторів із бази даних
 def load_moderators():
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT user_id FROM moderators')
         moderators = {row[0] for row in cursor.fetchall()}
@@ -89,12 +92,13 @@ def load_moderators():
         logger.error(f"Помилка завантаження модераторів: {e}")
         return set()
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Додавання модератора до бази даних
 def add_moderator_to_db(user_id: int, username: str = None):
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('INSERT OR IGNORE INTO moderators (user_id, username) VALUES (?, ?)', (user_id, username))
         conn.commit()
@@ -102,12 +106,13 @@ def add_moderator_to_db(user_id: int, username: str = None):
     except sqlite3.Error as e:
         logger.error(f"Помилка додавання модератора до бази: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Видалення модератора з бази даних
 def remove_moderator_from_db(user_id: int):
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM moderators WHERE user_id = ?', (user_id,))
         conn.commit()
@@ -115,12 +120,13 @@ def remove_moderator_from_db(user_id: int):
     except sqlite3.Error as e:
         logger.error(f"Помилка видалення модератора з бази: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Перевірка, чи є користувач модератором
 def is_moderator(user_id: int) -> bool:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT 1 FROM moderators WHERE user_id = ?', (user_id,))
         result = cursor.fetchone() is not None
@@ -129,12 +135,13 @@ def is_moderator(user_id: int) -> bool:
         logger.error(f"Помилка перевірки модератора: {e}")
         return False
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Отримання username модератора з бази даних
 def get_moderator_username(user_id: int) -> str | None:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT username FROM moderators WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
@@ -143,12 +150,13 @@ def get_moderator_username(user_id: int) -> str | None:
         logger.error(f"Помилка отримання username модератора: {e}")
         return None
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Додавання попередження
 def add_warning(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO warnings (user_id, chat_id, warn_count)
@@ -163,12 +171,13 @@ def add_warning(user_id: int, chat_id: int) -> int:
         logger.error(f"Помилка додавання попередження: {e}")
         return 0
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Зняття попередження
 def remove_warning(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE warnings SET warn_count = warn_count - 1
@@ -187,26 +196,27 @@ def remove_warning(user_id: int, chat_id: int) -> int:
         logger.error(f"Помилка зняття попередження: {e}")
         return 0
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Додавання бана
 def add_ban(user_id: int, chat_id: int, reason: str):
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO bans (user_id, chat_id, reason) VALUES (?, ?, ?)',
-                       (user_id, chat_id, reason))
+        cursor.execute('INSERT OR REPLACE INTO bans (user_id, chat_id, reason) VALUES (?, ?, ?)', (user_id, chat_id, reason))
         conn.commit()
         logger.info(f"Додано бан: user_id={user_id}, chat_id={chat_id}, reason={reason}")
     except sqlite3.Error as e:
         logger.error(f"Помилка додавання бана: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Зняття бана
 def remove_ban(user_id: int, chat_id: int):
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM bans WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         conn.commit()
@@ -214,12 +224,13 @@ def remove_ban(user_id: int, chat_id: int):
     except sqlite3.Error as e:
         logger.error(f"Помилка зняття бана: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Отримання кількості попереджень
 def get_warning_count(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT warn_count FROM warnings WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         result = cursor.fetchone()
@@ -228,12 +239,13 @@ def get_warning_count(user_id: int, chat_id: int) -> int:
         logger.error(f"Помилка отримання попереджень: {e}")
         return 0
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Логування покарань
 def log_punishment(user_id: int, chat_id: int, punishment_type: str, reason: str, duration_minutes: int | None = None, moderator_id: int | None = None):
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO punishments (user_id, chat_id, punishment_type, reason, timestamp, duration_minutes, moderator_id)
@@ -244,12 +256,13 @@ def log_punishment(user_id: int, chat_id: int, punishment_type: str, reason: str
     except sqlite3.Error as e:
         logger.error(f"Помилка логування покарання: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Отримання історії покарань
 def get_punishments(user_id: int, chat_id: int) -> list:
     try:
-        conn = sqlite3.connect('moderators.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT punishment_type, reason, timestamp, duration_minutes, moderator_id
@@ -272,7 +285,8 @@ def get_punishments(user_id: int, chat_id: int) -> list:
         logger.error(f"Помилка отримання історії покарань: {e}")
         return []
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Зчитування заборонених слів із файлу
 def load_forbidden_words(file_path='forbidden_words.txt'):
@@ -331,8 +345,8 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
             logger.info(f"Username відсутній, використовується ім'я: {mention} для user_id={user_id}")
             return mention
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при отриманні користувача {user_id} у чаті {chat_id}: {e}")
-        return None
+        logger.warning(f"Помилка при отриманні користувача {user_id} у чаті {chat_id}: {e}")
+        return f"ID\\:{user_id}"
 
 # Функція для безпечного видалення повідомлення
 async def safe_delete_message(message: types.Message):
@@ -513,12 +527,11 @@ async def kick_user(message: types.Message):
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
 
     # Надсилаємо музику перед кік
-    audio_path = 'QuantRP - ПРОЩАВАЙ.mp3'
-    if os.path.exists(audio_path):
+    if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
-                audio=types.FSInputFile(audio_path),
+                audio=types.FSInputFile(AUDIO_PATH),
                 caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
@@ -527,7 +540,7 @@ async def kick_user(message: types.Message):
         except TelegramBadRequest as e:
             logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
     else:
-        logger.warning(f"Аудіофайл {audio_path} не знайдено")
+        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
 
     # Виконуємо кік
     try:
@@ -614,12 +627,11 @@ async def ban_user(message: types.Message):
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
 
     # Надсилаємо музику перед бан
-    audio_path = 'QuantRP - ПРОЩАВАЙ.mp3'
-    if os.path.exists(audio_path):
+    if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
-                audio=types.FSInputFile(audio_path),
+                audio=types.FSInputFile(AUDIO_PATH),
                 caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
@@ -628,7 +640,7 @@ async def ban_user(message: types.Message):
         except TelegramBadRequest as e:
             logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
     else:
-        logger.warning(f"Аудіофайл {audio_path} не знайдено")
+        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
 
     # Виконуємо бан
     try:
@@ -829,28 +841,6 @@ async def unban_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-async def get_user_mention(user_id: int, chat_id: int) -> str | None:
-    try:
-        logger.info(f"Спроба отримати згадку для user_id={user_id}, chat_id={chat_id}")
-        chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        user = chat_member.user
-        if user.username:
-            escaped_username = escape_markdown_v2(user.username)
-            mention = f"@{escaped_username}"
-            logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
-            return mention
-        else:
-            escaped_name = escape_markdown_v2(user.first_name or f"User {user_id}")
-            mention = f"[{escaped_name}]"
-            logger.info(f"Username відсутній, використовується ім'я: {mention} для user_id={user_id}")
-            return mention
-    except TelegramBadRequest as e:
-        logger.warning(f"Помилка при отриманні користувача user_id={user_id} у чаті {chat_id}: {e}")
-        return f"ID\\:{user_id}"
-    except Exception as e:
-        logger.error(f"Непередбачена помилка при отриманні згадки для user_id={user_id}: {e}")
-        return f"ID\\:{user_id}"
-
 @dp.message(Command('info'))
 async def info_user(message: types.Message):
     if not has_moderator_privileges(message.from_user.id):
@@ -870,7 +860,6 @@ async def info_user(message: types.Message):
 
     username = args[1].lstrip('@')
     try:
-        # Отримуємо user_id за username через Telethon
         async with telethon_client:
             try:
                 user = await telethon_client.get_entity(username)
@@ -884,11 +873,9 @@ async def info_user(message: types.Message):
                 await safe_delete_message(reply)
                 return
 
-        # Отримуємо історію покарань (один раз)
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
 
-        # Спробуємо отримати інформацію про учасника чату
         mention = f"@{escape_markdown_v2(username)}"
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
@@ -899,7 +886,6 @@ async def info_user(message: types.Message):
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
             mention += f" (не є учасником чату)"
 
-        # Формуємо список покарань
         punishment_list = []
         for p in punishments:
             punishment_type = {
@@ -909,7 +895,6 @@ async def info_user(message: types.Message):
                 "mute": "Мут"
             }.get(p["type"], p["type"])
             duration = f" ({p['duration_minutes']} хвилин)" if p["duration_minutes"] else ""
-            # Перевіряємо moderator_id перед викликом get_user_mention
             moderator_id = p["moderator_id"]
             if moderator_id is None or not isinstance(moderator_id, int):
                 logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
@@ -922,7 +907,6 @@ async def info_user(message: types.Message):
             )
             punishment_list.append(punishment_text)
 
-        # Формуємо відповідь
         if not punishment_list:
             text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
@@ -930,7 +914,7 @@ async def info_user(message: types.Message):
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except Exception as e:
-        logger.error(f"Загальна помилка обробки команди /info для username={username}, user_id={user_id if 'user_id' in locals() else 'unknown'}: {e}")
+        logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
         reply = await message.reply(f"Помилка при отриманні інформації про користувача @{escape_markdown_v2(username)}: {str(e)}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -956,7 +940,6 @@ async def make_announcement(message: types.Message):
     announcement_text = args[1]
     chat_id = message.chat.id
 
-    # Отримання списку учасників
     participants = await get_chat_participants(chat_id)
     if not participants:
         reply = await message.reply("Не вдалося отримати список учасників. Перевірте налаштування Telethon.")
@@ -965,13 +948,11 @@ async def make_announcement(message: types.Message):
         await safe_delete_message(reply)
         return
 
-    # Розбиваємо учасників на групи по 50
     chunk_size = 50
     participant_chunks = [participants[i:i + chunk_size] for i in range(0, len(participants), chunk_size)]
     sent_message = None
 
     try:
-        # Надсилаємо перше повідомлення з текстом оголошення
         first_chunk = participant_chunks[0] if participant_chunks else []
         mentions = ' '.join(first_chunk)
         full_text = escape_markdown_v2(f"📢 Оголошення:\n{announcement_text}\n\n{mentions}" if mentions else f"📢 Оголошення:\n{announcement_text}")
@@ -981,7 +962,6 @@ async def make_announcement(message: types.Message):
             parse_mode="MarkdownV2",
             disable_notification=False
         )
-        # Закріплюємо перше повідомлення
         await bot.pin_chat_message(
             chat_id=chat_id,
             message_id=sent_message.message_id,
@@ -989,7 +969,6 @@ async def make_announcement(message: types.Message):
         )
         logger.info(f"Надіслано та закріплено перше оголошення в чаті {chat_id} з {len(first_chunk)} згадками")
 
-        # Надсилаємо додаткові повідомлення з рештою згадок з затримкою 5 секунд
         for chunk in participant_chunks[1:]:
             mentions = ' '.join(chunk)
             if mentions:
@@ -1001,7 +980,7 @@ async def make_announcement(message: types.Message):
                     disable_notification=True
                 )
                 logger.info(f"Надіслано додаткове повідомлення з {len(chunk)} згадками в чаті {chat_id}")
-                await asyncio.sleep(5)  # Затримка 5 секунд між повідомленнями
+                await asyncio.sleep(4)
         await safe_delete_message(message)
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні/закріпленні оголошення в чаті {chat_id}: {e}")
@@ -1041,9 +1020,6 @@ async def welcome_new_member(update: ChatMemberUpdated):
             except Exception as debug_e:
                 logger.error(f"Помилка дебаг-повідомлення для {user.id}: {debug_e}")
 
-from aiogram import types
-from aiogram.filters import Command
-
 @dp.message(Command('rules'))
 async def show_rules(message: types.Message):
     rules_text = (
@@ -1054,12 +1030,12 @@ async def show_rules(message: types.Message):
         "🔹 Адміністрація залишає за собою право вносити зміни в правила та застосовувати санкції за їх порушення.\n"
         "🔹 Адміністрація ніколи не вимагає у вас паспортні данні та особисту інформацію та ніколи не буде писати вам у ТЕЛЕГРАМ!\n\n"
         "2️⃣ *Заборонено*\n"
-        "🚫  Образи та неадекватна поведінка – будь-які форми хамства, токсичності, дискримінації.\n"
-        "🚫  Флуд, спам, реклама – масові надсилання повідомлень, реклама сторонніх сервісів або проектів без дозволу адміністрації.\n"
-        "🚫  Політика та релігія – обговорення політичних чи релігійних тем, що можуть спричинити конфлікти.\n"
-        "🚫  Обговорення сторонніх серверів – рекламування або залучення користувачів на інші схожі проекти.\n"
-        "🚫  Використання нецензурної лексики – груба лексика, навіть частково замаскована.\n"
-        "🚫  Продаж акаунтів/валюти – заборонені будь-які угоди, пов’язані з продажем облікових записів або внутрішньоігрової валюти.\n\n"
+        "🚫 Образи та неадекватна поведінка – будь-які форми хамства, токсичності, дискримінації.\n"
+        "🚫 Флуд, спам, реклама – масові надсилання повідомлень, реклама сторонніх сервісів або проектів без дозволу адміністрації.\n"
+        "🚫 Політика та релігія – обговорення політичних чи релігійних тем, що можуть спричинити конфлікти.\n"
+        "🚫 Обговорення сторонніх серверів – рекламування або залучення користувачів на інші схожі проекти.\n"
+        "🚫 Використання нецензурної лексики – груба лексика, навіть частково замаскована.\n"
+        "🚫 Продаж акаунтів/валюти – заборонені будь-які угоди, пов’язані з продажем облікових записів або внутрішньоігрової валюти.\n\n"
         "3️⃣ *Рекомендації щодо спілкування*\n"
         "✅ Спілкуйтесь дружньо та конструктивно.\n"
         "✅ Якщо виникають конфлікти – звертайтесь до модераторів.\n"
@@ -1081,7 +1057,6 @@ async def show_rules(message: types.Message):
         await safe_delete_message(message=message)
         await asyncio.sleep(25)
         await safe_delete_message(reply=reply)
-
 
 @dp.message(Command('help'))
 async def show_help(message: types.Message):
@@ -1117,15 +1092,13 @@ async def show_help(message: types.Message):
         await safe_delete_message(message=message)
         await asyncio.sleep(25)
         await safe_delete_message(reply=reply)
-        logger.info(
-            f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
+        logger.info(f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні списку команд для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні команд. Спробуйте ще раз.")
         await safe_delete_message(message=message)
         await asyncio.sleep(25)
         await safe_delete_message(reply=reply)
-
 
 @dp.message()
 async def filter_messages(message: types.Message):
@@ -1175,9 +1148,21 @@ async def main():
                 return TWO_FACTOR_PASSWORD if TWO_FACTOR_PASSWORD else None
             await telethon_client.start(phone=phone_input, password=password_input)
             logger.info("Telethon клієнт запущено успішно")
+        me = await bot.get_me()
+        logger.info(f"Бот запущений: @{me.username}")
+        try:
+            chat = await bot.get_chat(chat_id=-1002509289582)
+            admin_status = await bot.get_chat_member(chat_id=chat.id, user_id=me.id)
+            if admin_status.status in ["administrator", "creator"]:
+                logger.info(f"Бот є адміністратором у чаті {chat.id}. Права: {admin_status}")
+            else:
+                logger.error(f"Бот не є адміністратором у чаті {chat.id}. Обмежена функціональність.")
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка перевірки прав бота: {e}")
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Помилка ініціалізації бота: {e}")
+        logger.error(f"Критична помилка: {e}")
+        raise
     finally:
         if telethon_client and telethon_client.is_connected():
             await telethon_client.disconnect()
