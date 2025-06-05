@@ -1160,6 +1160,34 @@ async def filter_messages(message: types.Message):
 
 async def main():
     init_db()
+    try:
+        if telethon_client:
+            async def phone_input():
+                return PHONE_NUMBER
+
+            async def password_input():
+                return TWO_FACTOR_PASSWORD if TWO_FACTOR_PASSWORD else None
+
+            await telethon_client.start(phone=phone_input, password=password_input)
+            logger.info("Telethon клієнт запущено успішно")
+        me = await bot.get_me()
+        logger.info(f"Бот запущений: @{me.username}")
+        try:
+            chat = await bot.get_chat(chat_id=-1002509289582)
+            admin_status = await bot.get_chat_member(chat_id=chat.id, user_id=me.id)
+            if admin_status.status in ["administrator", "creator"]:
+                logger.info(f"Бот є адміністратором у чаті {chat.id}. Права: {admin_status}")
+            else:
+                logger.error(f"Бот не є адміністратором у чаті {chat.id}. Обмежена функціональність.")
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка перевірки прав бота: {e}")
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Критична помилка: {e}")
+        raise
+    finally:
+        if telethon_client and telethon_client.is_connected():
+            await telethon_client.disconnect()
 
 if __name__ == '__main__':
     asyncio.run(main())
