@@ -288,6 +288,25 @@ def get_punishments(user_id: int, chat_id: int) -> list:
         if 'conn' in locals():
             conn.close()
 
+@dp.message(Command('filter'))
+async def toggle_filter(message: types.Message):
+    global FORBIDDEN_WORDS_FILTER
+    if not has_moderator_privileges(message.from_user.id):
+        reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    FORBIDDEN_WORDS_FILTER = not FORBIDDEN_WORDS_FILTER
+    status = "✅ увімкнено" if FORBIDDEN_WORDS_FILTER else "❌ вимкнено"
+    reply = await message.reply(f"Фільтрація заборонених слів {status}")
+    await safe_delete_message(message)
+    await asyncio.sleep(25)
+    await safe_delete_message(reply)
+    logger.info(f"Змінено статус фільтрації заборонених слів: {status}")
+
+
 # Зчитування заборонених слів із файлу
 def load_forbidden_words(file_path='forbidden_words.txt'):
     try:
@@ -306,6 +325,7 @@ dp = Dispatcher()
 
 # Список заборонених слів
 FORBIDDEN_WORDS = load_forbidden_words()
+FORBIDDEN_WORDS_FILTER = True
 
 # Налаштування привітання
 WELCOME_MESSAGE = True  # True - увімкнути привітання, False - вимкнути
@@ -1000,7 +1020,7 @@ async def welcome_new_member(update: ChatMemberUpdated):
         try:
             mention = await get_user_mention(user.id, update.chat.id) or f"User {user.id}"
             chat = await bot.get_chat(update.chat.id)
-            chat_username = f"@{chat.username}" if chat.username else f"ID:{update.chat.id}"
+            chat_username = f"@{chat.username}" if chat.username else f"ID:{update.chat.first_name}"
             text = escape_markdown_v2(f"Вітаємо, {mention}! Ласкаво просимо до {chat_username}! 😊")
             await bot.send_message(
                 chat_id=update.chat.id,
@@ -1064,7 +1084,8 @@ async def show_help(message: types.Message):
     if is_mod:
         help_text = (
             "📚 Список доступних команд для модераторів/адміністраторів:\n\n"
-            "🔧 /welcome - Увімкнути/вимкнути привітання нових учасників.\n"
+            "🔧 /welcome - Увімкнути/вимкнути привітання нових учасників.(Тільки для адміністраторів)\n"
+            "🔧 /filter - Увімкнути/вимкнути фільтрацію заборонених слів.(Тільки для адміністраторів)\n"
             "👮 /addmoder <user_id> - Додати модератора (через ID або відповідь).\n"
             "👮 /removemoder <user_id> - Видалити модератора (через ID або відповідь).\n"
             "🚪 /kick <user_id> <причина> - Кікнути користувача (через ID або відповідь).\n"
@@ -1102,7 +1123,7 @@ async def show_help(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    if not message.text:
+    if not FORBIDDEN_WORDS_FILTER or not message.text:  # Перевірка стану фільтра
         return
     message_text = message.text.lower()
     for word in FORBIDDEN_WORDS:
@@ -1140,32 +1161,6 @@ async def filter_messages(message: types.Message):
 
 async def main():
     init_db()
-    try:
-        if telethon_client:
-            async def phone_input():
-                return PHONE_NUMBER
-            async def password_input():
-                return TWO_FACTOR_PASSWORD if TWO_FACTOR_PASSWORD else None
-            await telethon_client.start(phone=phone_input, password=password_input)
-            logger.info("Telethon клієнт запущено успішно")
-        me = await bot.get_me()
-        logger.info(f"Бот запущений: @{me.username}")
-        try:
-            chat = await bot.get_chat(chat_id=-1002509289582)
-            admin_status = await bot.get_chat_member(chat_id=chat.id, user_id=me.id)
-            if admin_status.status in ["administrator", "creator"]:
-                logger.info(f"Бот є адміністратором у чаті {chat.id}. Права: {admin_status}")
-            else:
-                logger.error(f"Бот не є адміністратором у чаті {chat.id}. Обмежена функціональність.")
-        except TelegramBadRequest as e:
-            logger.error(f"Помилка перевірки прав бота: {e}")
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Критична помилка: {e}")
-        raise
-    finally:
-        if telethon_client and telethon_client.is_connected():
-            await telethon_client.disconnect()
 
 if __name__ == '__main__':
     asyncio.run(main())
