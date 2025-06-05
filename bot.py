@@ -989,7 +989,7 @@ async def make_announcement(message: types.Message):
         )
         logger.info(f"Надіслано та закріплено перше оголошення в чаті {chat_id} з {len(first_chunk)} згадками")
 
-        # Надсилаємо додаткові повідомлення з рештою згадок
+        # Надсилаємо додаткові повідомлення з рештою згадок з затримкою 5 секунд
         for chunk in participant_chunks[1:]:
             mentions = ' '.join(chunk)
             if mentions:
@@ -1001,7 +1001,7 @@ async def make_announcement(message: types.Message):
                     disable_notification=True
                 )
                 logger.info(f"Надіслано додаткове повідомлення з {len(chunk)} згадками в чаті {chat_id}")
-                await asyncio.sleep(4)
+                await asyncio.sleep(5)  # Затримка 5 секунд між повідомленнями
         await safe_delete_message(message)
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні/закріпленні оголошення в чаті {chat_id}: {e}")
