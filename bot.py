@@ -1047,16 +1047,16 @@ async def show_rules(message: types.Message):
     text = escape_markdown_v2_rules(rules_text)
     try:
         reply = await message.reply(text, parse_mode="MarkdownV2")
-        await safe_delete_message(message=message)
+        await safe_delete_message(message)
         await asyncio.sleep(25)
-        await safe_delete_message(reply=reply)
+        await safe_delete_message(reply)
         logger.info(f"Надіслано правила для user_id={message.from_user.id}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні правил для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні правил. Спробуйте ще раз.")
-        await safe_delete_message(message=message)
+        await safe_delete_message(message)
         await asyncio.sleep(25)
-        await safe_delete_message(reply=reply)
+        await safe_delete_message(reply)
 
 @dp.message(Command('help'))
 async def show_help(message: types.Message):
@@ -1089,16 +1089,16 @@ async def show_help(message: types.Message):
     text = escape_markdown_v2_help(help_text)
     try:
         reply = await message.reply(text, parse_mode="MarkdownV2")
-        await safe_delete_message(message=message)
+        await safe_delete_message(message)
         await asyncio.sleep(25)
-        await safe_delete_message(reply=reply)
+        await safe_delete_message(reply)
         logger.info(f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні списку команд для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні команд. Спробуйте ще раз.")
-        await safe_delete_message(message=message)
+        await safe_delete_message(message)
         await asyncio.sleep(25)
-        await safe_delete_message(reply=reply)
+        await safe_delete_message(reply)
 
 @dp.message()
 async def filter_messages(message: types.Message):
