@@ -3,15 +3,16 @@ import os
 import logging
 import sqlite3
 import re
+import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ChatPermissions, ChatMemberUpdated
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
-import datetime
 from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
-from telethon.tl.types import ChannelParticipantsSearch
+from telethon.tl.types import ChannelParticipantsSearch, Channel, Chat
+from telethon.errors import FloodWaitError
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -28,6 +29,7 @@ TWO_FACTOR_PASSWORD = os.getenv('TWO_FACTOR_PASSWORD', '')
 SESSION_PATH = os.getenv('SESSION_PATH', 'bot_session')
 DB_PATH = os.getenv('DB_PATH', 'moderators.db')
 AUDIO_PATH = os.getenv('AUDIO_PATH', 'QuantRP - ПРОЩАВАЙ.mp3')
+ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(',') if uid]
 
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
@@ -309,7 +311,7 @@ FORBIDDEN_WORDS = load_forbidden_words()
 FORBIDDEN_WORDS_FILTER = True
 
 # Налаштування привітання
-WELCOME_MESSAGE = True  # True - увімкнути привітання, False - вимкнути
+WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
@@ -396,26 +398,45 @@ async def get_user_data(message: types.Message, args: list) -> tuple[int, str | 
 def has_moderator_privileges(user_id: int) -> bool:
     return user_id in ADMIN_IDS or is_moderator(user_id)
 
-# Отримання списку учасників через Telethon
-async def get_chat_participants(chat_id: int) -> list:
-    if not telethon_client:
-        logger.error("Telethon клієнт не ініціалізований. Перевірте API_ID, API_HASH, PHONE_NUMBER.")
-        return []
+# Перевірка, чи має користувач доступ до /get_users
+def is_allowed_user(user_id: int) -> bool:
+    return user_id in ALLOWED_USER_IDS
+
+# Функція для отримання всіх учасників чату
+async def get_all_participants(chat_id: int) -> list:
+    members = []
     try:
         async with telethon_client:
             chat = await telethon_client.get_entity(chat_id)
-            participants = []
-            async for participant in telethon_client.iter_participants(chat, filter=ChannelParticipantsSearch('')):
-                if participant.username:
-                    participants.append(f"@{participant.username}")
-                elif participant.first_name:
-                    participants.append(f"[{escape_markdown_v2(participant.first_name)}]")
-            logger.info(f"Отримано {len(participants)} учасників для чату {chat_id}")
-            return participants
+            if not isinstance(chat, (Channel, Chat)):
+                logger.error(f"Chat {chat_id} не є групою або каналом")
+                return members
+            offset = 0
+            limit = 200
+            while True:
+                try:
+                    participants = await telethon_client(GetParticipantsRequest(
+                        channel=chat,
+                        filter=ChannelParticipantsSearch(''),
+                        offset=offset,
+                        limit=limit,
+                        hash=0
+                    ))
+                    if not participants.users:
+                        break
+                    for user in participants.users:
+                        name = (user.first_name or "") + (" " + user.last_name if user.last_name else "")
+                        username = f"@{user.username}" if user.username else ""
+                        members.append(f"{name.strip()} {username}".strip())
+                    offset += len(participants.users)
+                except FloodWaitError as e:
+                    logger.warning(f"Обмеження Telegram API, очікування {e.seconds} секунд")
+                    await asyncio.sleep(e.seconds)
     except Exception as e:
-        logger.error(f"Помилка отримання учасників чату {chat_id}: {e}")
-        return []
+        logger.error(f"Помилка при отриманні учасників для чату {chat_id}: {str(e)}")
+    return members
 
+# Обробники команд
 @dp.message(Command('welcome'))
 async def toggle_welcome(message: types.Message):
     global WELCOME_MESSAGE
@@ -545,7 +566,6 @@ async def kick_user(message: types.Message):
     user_id, username, reason = user_data
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
 
-    # Надсилаємо музику перед кік
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
@@ -561,7 +581,6 @@ async def kick_user(message: types.Message):
     else:
         logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
 
-    # Виконуємо кік
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         log_punishment(user_id, message.chat.id, "kick", reason, moderator_id=message.from_user.id)
@@ -645,7 +664,6 @@ async def ban_user(message: types.Message):
     user_id, username, reason = user_data
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
 
-    # Надсилаємо музику перед бан
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
@@ -661,7 +679,6 @@ async def ban_user(message: types.Message):
     else:
         logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
 
-    # Виконуємо бан
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         add_ban(user_id, message.chat.id, reason)
@@ -959,7 +976,7 @@ async def make_announcement(message: types.Message):
     announcement_text = args[1]
     chat_id = message.chat.id
 
-    participants = await get_chat_participants(chat_id)
+    participants = await get_all_participants(chat_id)
     if not participants:
         reply = await message.reply("Не вдалося отримати список учасників. Перевірте налаштування Telethon.")
         await safe_delete_message(message)
@@ -1007,6 +1024,46 @@ async def make_announcement(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
+@dp.message(Command('get_users'))
+async def get_users(message: types.Message):
+    if not is_allowed_user(message.from_user.id):
+        reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    chat_id = message.chat.id
+    members = await get_all_participants(chat_id)
+    if not members:
+        reply = await message.reply("Не вдалося отримати учасників або список порожній.")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    output = "\n".join(members)
+    filename = f"chat_{chat_id}_users.txt"
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(output)
+        await bot.send_document(
+            chat_id=message.chat.id,
+            document=types.FSInputFile(filename),
+            caption=escape_markdown_v2("Список учасників чату"),
+            parse_mode="MarkdownV2"
+        )
+        logger.info(f"Надіслано список учасників для чату {chat_id}")
+    except Exception as e:
+        logger.error(f"Помилка при надсиланні списку учасників для чату {chat_id}: {str(e)}")
+        reply = await message.reply(f"Помилка: {str(e)}")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
 
 @dp.chat_member()
 async def welcome_new_member(update: ChatMemberUpdated):
@@ -1097,12 +1154,14 @@ async def show_help(message: types.Message):
             "ℹ️ /info @username - Переглянути інформацію про користувача та його покарання.\n"
             "📢 /ad <текст> - Зробити оголошення зі згадкою всіх учасників.\n"
             "📜 /rules - Переглянути правила чату.\n"
+            "📋 /get_users - Отримати список учасників чату (тільки для дозволених користувачів).\n"
             "❓ /help - Показати цей список команд."
         )
     else:
         help_text = (
             "📚 Список доступних команд:\n\n"
             "📜 /rules - Переглянути правила чату.\n"
+            "📋 /get_users - Отримати список учасників чату (тільки для дозволених користувачів).\n"
             "❓ /help - Показати цей список команд."
         )
 
@@ -1122,7 +1181,7 @@ async def show_help(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    if not FORBIDDEN_WORDS_FILTER or not message.text:  # Перевірка стану фільтра
+    if not FORBIDDEN_WORDS_FILTER or not message.text:
         return
     message_text = message.text.lower()
     for word in FORBIDDEN_WORDS:
