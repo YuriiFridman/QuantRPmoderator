@@ -288,25 +288,6 @@ def get_punishments(user_id: int, chat_id: int) -> list:
         if 'conn' in locals():
             conn.close()
 
-@dp.message(Command('filter'))
-async def toggle_filter(message: types.Message):
-    global FORBIDDEN_WORDS_FILTER
-    if not has_moderator_privileges(message.from_user.id):
-        reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        return
-
-    FORBIDDEN_WORDS_FILTER = not FORBIDDEN_WORDS_FILTER
-    status = "✅ увімкнено" if FORBIDDEN_WORDS_FILTER else "❌ вимкнено"
-    reply = await message.reply(f"Фільтрація заборонених слів {status}")
-    await safe_delete_message(message)
-    await asyncio.sleep(25)
-    await safe_delete_message(reply)
-    logger.info(f"Змінено статус фільтрації заборонених слів: {status}")
-
-
 # Зчитування заборонених слів із файлу
 def load_forbidden_words(file_path='forbidden_words.txt'):
     try:
@@ -452,6 +433,24 @@ async def toggle_welcome(message: types.Message):
     await asyncio.sleep(25)
     await safe_delete_message(reply)
     logger.info(f"Змінено статус привітань: {status}")
+
+@dp.message(Command('filter'))
+async def toggle_filter(message: types.Message):
+    global FORBIDDEN_WORDS_FILTER
+    if not has_moderator_privileges(message.from_user.id):
+        reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    FORBIDDEN_WORDS_FILTER = not FORBIDDEN_WORDS_FILTER
+    status = "✅ увімкнено" if FORBIDDEN_WORDS_FILTER else "❌ вимкнено"
+    reply = await message.reply(f"Фільтрація заборонених слів {status}")
+    await safe_delete_message(message)
+    await asyncio.sleep(25)
+    await safe_delete_message(reply)
+    logger.info(f"Змінено статус фільтрації заборонених слів: {status}")
 
 @dp.message(Command('addmoder'))
 async def add_moderator(message: types.Message):
