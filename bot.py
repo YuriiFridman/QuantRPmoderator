@@ -315,7 +315,7 @@ WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\_']
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
@@ -338,7 +338,8 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         user = chat_member.user
         if user.username:
-            escaped_username = escape_markdown_v2(user.username)
+            # Додаткове екранування підкреслення для надійності
+            escaped_username = escape_markdown_v2(user.username).replace('_', '\\_')
             mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
@@ -894,7 +895,7 @@ async def info_user(message: types.Message):
         await safe_delete_message(reply)
         return
 
-    username = args[1].lstrip('@')
+    username = args[1].lstrip('@').replace('_', '\\_')
     try:
         async with telethon_client:
             try:
