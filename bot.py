@@ -339,7 +339,7 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         user = chat_member.user
         if user.username:
             # Додаткове екранування підкреслення для надійності
-            escaped_username = escape_markdown_v2(user.username).replace('_', '\\\_')
+            escaped_username = escape_markdown_v2(user.username).replace('_', '\\_')
             mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
@@ -750,7 +750,7 @@ async def mute_user(message: types.Message):
         )
         log_punishment(user_id, message.chat.id, "mute", reason, duration_minutes=minutes, moderator_id=message.from_user.id)
         mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Користувач {mention} отримав мут на {minutes} хвилин. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач @{username} отримав мут на {minutes} хвилин. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
