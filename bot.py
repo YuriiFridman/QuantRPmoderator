@@ -337,7 +337,7 @@ WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
@@ -354,27 +354,18 @@ def escape_markdown_v2_help(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
-def escape_markdown_v2_info(text: str) -> str:
-    if text is None:
-        text = "Немає даних"
-    text = str(text)  # Перетворюємо на рядок, щоб уникнути проблем із None або іншими типами
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    logger.debug(f"Екранований текст для /info: {repr(text)}")
-    return text
-
 # Функція для створення згадки користувача
 async def get_user_mention(user_id: int, chat_id: int) -> str | None:
     try:
         chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         user = chat_member.user
         if user.username:
-            mention = f"@{escape_markdown_v2_info(user.username.lstrip('@'))}"
+            escaped_username = escape_markdown_v2(user.username)
+            mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
         else:
-            escaped_name = escape_markdown_v2_info(user.first_name or f"User {user_id}")
+            escaped_name = escape_markdown_v2(user.first_name or f"User {user_id}")
             mention = f"[{escaped_name}]"
             logger.info(f"Username відсутній, використовується ім'я: {mention} для user_id={user_id}")
             return mention
@@ -934,10 +925,7 @@ async def info_user(message: types.Message):
                 logger.info(f"Отримано user_id={user_id} для username={username}")
             except ValueError as e:
                 logger.error(f"Не вдалося знайти користувача за username={username}: {e}")
-                reply = await message.reply(
-                    f"Користувач @{escape_markdown_v2_info(username)} не знайдений.",
-                    parse_mode="MarkdownV2"
-                )
+                reply = await message.reply(f"Користувач @{escape_markdown_v2(username)} не знайдений.")
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
@@ -945,21 +933,16 @@ async def info_user(message: types.Message):
 
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
-        logger.debug(f"Дані покарань: {punishments}")
 
-        # Формуємо mention з правильним екрануванням
+        mention = f"@{escape_markdown_v2(username)}"
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
             chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-            mention = await get_user_mention(user_id, message.chat.id)
-            if not mention:
-                mention = f"ID\\:{escape_markdown_v2_info(str(user_id))}"
-            else:
-                mention = escape_markdown_v2_info(mention)  # Додаткове екранування mention
+            mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
-            mention = f"@{escape_markdown_v2_info(username)}\\ \\(не є учасником чату\\)"
+            mention += f" (не є учасником чату)"
 
         punishment_list = []
         for p in punishments:
@@ -975,51 +958,26 @@ async def info_user(message: types.Message):
                 logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
                 moderator_mention = "Невідомий модератор"
             else:
-                moderator_mention = await get_user_mention(moderator_id, message.chat.id)
-                if not moderator_mention:
-                    moderator_mention = f"ID\\:{escape_markdown_v2_info(str(moderator_id))}"
-                else:
-                    moderator_mention = escape_markdown_v2_info(moderator_mention)
-
-            try:
-                timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y\\-%m\\-%d %H\\:%M')
-            except ValueError:
-                logger.warning(f"Некоректний формат timestamp={p['timestamp']} для user_id={user_id}, використовується як є")
-                timestamp = escape_markdown_v2_info(str(p["timestamp"]))
-
-            # Екрануємо всі частини окремо
-            punishment_type_escaped = escape_markdown_v2_info(punishment_type)
-            duration_escaped = escape_markdown_v2_info(duration) if duration else ""
-            reason_escaped = escape_markdown_v2_info(str(p['reason'] or "Немає причини"))
-            punishment_text = f"{punishment_type_escaped}{duration_escaped} \\- Причина: {reason_escaped} \\(Видав: {moderator_mention}, {timestamp}\\)"
+                moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{moderator_id}"
+            timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+            punishment_text = escape_markdown_v2(
+                f"{punishment_type}{duration} - Причина: {p['reason']} (Видав: {moderator_mention}, {timestamp})"
+            )
             punishment_list.append(punishment_text)
-            logger.debug(f"Сформований рядок покарання: {repr(punishment_text)}")
 
-        # Формуємо текст з правильним екрануванням
-        user_id_escaped = escape_markdown_v2_info(str(user_id))
         if not punishment_list:
-            text = f"Користувач {mention}\nUserID: {user_id_escaped}\nПокарань не знайдено."
+            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
-            text = f"Користувач {mention}\nUserID: {user_id_escaped}\n\nІсторія покарань:\n" + '\n'.join(punishment_list)
-
-        # Логуємо сирий текст для відладки
-        logger.debug(f"Сирий текст перед відправкою: {repr(text)}")
+            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
     except Exception as e:
         logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
-        # Екрануємо повідомлення про помилку
-        error_message = escape_markdown_v2_info(str(e).replace('.', '\.').replace('-', '\-'))
-        reply = await message.reply(
-            f"Помилка при отриманні інформації про користувача @{escape_markdown_v2_info(username)}: {error_message}",
-            parse_mode="MarkdownV2"
-        )
+        reply = await message.reply(f"Помилка при отриманні інформації про користувача @{escape_markdown_v2(username)}: {str(e)}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('ad'))
 async def make_announcement(message: types.Message):
