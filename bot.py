@@ -618,13 +618,13 @@ async def warn_user(message: types.Message):
 
     user_id, username, reason = user_data
     warn_count = add_warning(user_id, message.chat.id)
-    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+    mention = await f"{username}" or f"ID\\:{user_id}"
     log_punishment(user_id, message.chat.id, "warn", reason, moderator_id=message.from_user.id)
     if warn_count >= 3:
         try:
             await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
             log_punishment(user_id, message.chat.id, "kick", "3 попередження", moderator_id=message.from_user.id)
-            text = escape_markdown_v2(f"Користувач {mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
+            text = escape_markdown_v2(f"Користувач @{mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
             reply = await message.reply(text, parse_mode="MarkdownV2")
             await safe_delete_message(message)
             await asyncio.sleep(25)
@@ -637,7 +637,7 @@ async def warn_user(message: types.Message):
             await asyncio.sleep(25)
             await safe_delete_message(reply)
     else:
-        text = escape_markdown_v2(f"Користувач {mention} отримав попередження {warn_count}/3. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач @{mention} отримав попередження {warn_count}/3. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -663,14 +663,14 @@ async def ban_user(message: types.Message):
         return
 
     user_id, username, reason = user_data
-    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+    mention = await f"{username}" or f"ID\\:{user_id}"
 
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
                 audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
+                caption=escape_markdown_v2(f"Користувач @{mention} отримує бан! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
             logger.info(f"Надіслано музику перед бан для user_id={user_id} у чаті {message.chat.id}")
@@ -684,7 +684,7 @@ async def ban_user(message: types.Message):
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         add_ban(user_id, message.chat.id, reason)
         log_punishment(user_id, message.chat.id, "ban", reason, moderator_id=message.from_user.id)
-        text = escape_markdown_v2(f"Користувач {mention} забанений. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач @{mention} забанений. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -749,8 +749,8 @@ async def mute_user(message: types.Message):
             until_date=mute_until
         )
         log_punishment(user_id, message.chat.id, "mute", reason, duration_minutes=minutes, moderator_id=message.from_user.id)
-        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Користувач @{username} отримав мут на {minutes} хвилин. Причина: {reason}.")
+        mention = await f"{username}" or f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Користувач @{mention} отримав мут на {minutes} хвилин. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -793,8 +793,8 @@ async def unmute_user(message: types.Message):
                 can_send_other_messages=True
             )
         )
-        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Знято мут із користувача {mention}.")
+        mention = await f"{username}" or f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Знято мут із користувача @{mention}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -827,16 +827,16 @@ async def unwarn_user(message: types.Message):
 
     user_id, username, _ = user_data
     warn_count = remove_warning(user_id, message.chat.id)
-    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+    mention = await f"{username}" or f"ID\\:{user_id}"
     if warn_count >= 0:
-        text = escape_markdown_v2(f"Знято попередження з користувача {mention}. Залишилось {warn_count}/3.")
+        text = escape_markdown_v2(f"Знято попередження з користувача @{mention}. Залишилось {warn_count}/3.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         logger.info(f"Знято попередження: user_id={user_id}, username={username}, warn_count={warn_count}, chat_id={message.chat.id}")
     else:
-        text = escape_markdown_v2(f"У користувача {mention} немає попереджень.")
+        text = escape_markdown_v2(f"У користувача @{mention} немає попереджень.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -864,8 +864,8 @@ async def unban_user(message: types.Message):
     try:
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=user_id)
         remove_ban(user_id, message.chat.id)
-        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Знято бан із користувача {mention}.")
+        mention = await f"{username}" or f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Знято бан із користувача @{mention}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -918,7 +918,7 @@ async def info_user(message: types.Message):
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
             chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-            mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+            mention = await f"{username}" or f"ID\\:{user_id}"
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
             mention += f" (не є учасником чату)"
