@@ -565,14 +565,14 @@ async def kick_user(message: types.Message):
         return
 
     user_id, username, reason = user_data
-    mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+    mention = f"{username}" or f"ID\\:{user_id}"
 
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
                 audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵 Причина: {reason}"),
+                caption=escape_markdown_v2(f"Користувач @{mention} отримує кік! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
             logger.info(f"Надіслано музику перед кік для user_id={user_id} у чаті {message.chat.id}")
