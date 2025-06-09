@@ -911,7 +911,6 @@ async def info_user(message: types.Message):
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
 
-        # Отримуємо mention без зайвого екранування юзернейму
         mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
 
         try:
@@ -931,6 +930,7 @@ async def info_user(message: types.Message):
                 "mute": "Мут"
             }.get(p["type"], p["type"])
             duration = f" ({p['duration_minutes']} хвилин)" if p["duration_minutes"] else ""
+            duration = escape_markdown_v2(duration)  # Екрануємо duration
             moderator_id = p["moderator_id"]
             if moderator_id is None or not isinstance(moderator_id, int):
                 logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
@@ -938,15 +938,16 @@ async def info_user(message: types.Message):
             else:
                 moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{moderator_id}"
             timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-            # Екрануємо лише необхідні частини
+            timestamp = escape_markdown_v2(timestamp)  # Екрануємо timestamp
             reason = escape_markdown_v2(p["reason"] if p["reason"] else "")
             punishment_text = f"{punishment_type}{duration} - Причина: {reason} (Видав: {moderator_mention}, {timestamp})"
             punishment_list.append(punishment_text)
 
         if not punishment_list:
-            text = f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено."
+            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
-            text = f"Користувач {mention}\nUserID: {user_id}\n\nІсторія покарань:\n" + '\n'.join(punishment_list)
+            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
+        logger.debug(f"Відправляється текст: {text}")  # Додаємо лог для дебагу
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except Exception as e:
