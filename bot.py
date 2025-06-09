@@ -338,8 +338,7 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         user = chat_member.user
         if user.username:
-            escaped_username = escape_markdown_v2(user.username)
-            mention = f"@{escaped_username}"
+            mention = f"@{user.username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
         else:
@@ -903,7 +902,7 @@ async def info_user(message: types.Message):
                 logger.info(f"Отримано user_id={user_id} для username={username}")
             except ValueError as e:
                 logger.error(f"Не вдалося знайти користувача за username={username}: {e}")
-                reply = await message.reply(f"Користувач @{escape_markdown_v2(username)} не знайдений.")
+                reply = await message.reply(f"Користувач @{username} не знайдений.")
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
@@ -912,9 +911,8 @@ async def info_user(message: types.Message):
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
 
-        # Додаткове екранування mention
+        # Отримуємо mention без зайвого екранування юзернейму
         mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        mention = escape_markdown_v2(mention)  # Додаткове екранування
 
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
@@ -922,7 +920,7 @@ async def info_user(message: types.Message):
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
-            mention += f" (не є учасником чату)"
+            mention += " (не є учасником чату)"
 
         punishment_list = []
         for p in punishments:
@@ -940,20 +938,20 @@ async def info_user(message: types.Message):
             else:
                 moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{moderator_id}"
             timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-            punishment_text = escape_markdown_v2(
-                f"{punishment_type}{duration} - Причина: {p['reason']} (Видав: {moderator_mention}, {timestamp})"
-            )
+            # Екрануємо лише необхідні частини
+            reason = escape_markdown_v2(p["reason"] if p["reason"] else "")
+            punishment_text = f"{punishment_type}{duration} - Причина: {reason} (Видав: {moderator_mention}, {timestamp})"
             punishment_list.append(punishment_text)
 
         if not punishment_list:
-            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено.")
+            text = f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено."
         else:
-            text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
+            text = f"Користувач {mention}\nUserID: {user_id}\n\nІсторія покарань:\n" + '\n'.join(punishment_list)
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except Exception as e:
         logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
-        reply = await message.reply(f"Помилка при отриманні інформації про користувача @{escape_markdown_v2(username)}: {str(e)}")
+        reply = await message.reply(f"Помилка при отриманні інформації про користувача @{username}: {str(e)}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
