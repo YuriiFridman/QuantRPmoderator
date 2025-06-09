@@ -1075,10 +1075,10 @@ async def welcome_new_member(update: ChatMemberUpdated):
     if (WELCOME_MESSAGE and new_status in ["member", "restricted"] and
             (update.old_chat_member is None or old_status in ["left", "kicked"])):
         try:
-            mention = await get_user_mention(user.id, update.chat.id) or f"User {user.id}"
+            mention = f"{user.username}" or f"ID\\:{user.user_id}"
             chat = await bot.get_chat(update.chat.id)
             chat_username = f"@{chat.username}" if chat.username else f"ID:{update.chat.first_name}"
-            text = escape_markdown_v2(f"Вітаємо, {mention}! Ласкаво просимо до {chat_username}! 😊")
+            text = escape_markdown_v2(f"Вітаємо, @{mention}! Ласкаво просимо до {chat_username}! 😊")
             await bot.send_message(
                 chat_id=update.chat.id,
                 text=text,
@@ -1088,11 +1088,6 @@ async def welcome_new_member(update: ChatMemberUpdated):
         except TelegramBadRequest as e:
             logger.error(f"Помилка при відправці привітання для {user.id}: {e}")
             try:
-                await bot.send_message(
-                    chat_id=update.chat.id,
-                    text=f"Вітаємо, user_id={user.id}! Ласкаво просимо до нашого чату! (Дебаг)",
-                    parse_mode=None
-                )
                 logger.info(f"Відправлено дебаг-повідомлення для {user.id}")
             except Exception as debug_e:
                 logger.error(f"Помилка дебаг-повідомлення для {user.id}: {debug_e}")
@@ -1201,7 +1196,8 @@ async def filter_messages(message: types.Message):
                     until_date=mute_until
                 )
                 log_punishment(message.from_user.id, message.chat.id, "mute", f"Використання забороненого слова: {word}", duration_minutes=24*60, moderator_id=None)
-                mention = await get_user_mention(message.from_user.id, message.chat.id) or f"User {message.from_user.id}"
+
+                mention = f"{user.username}" or f"ID\\:{user.user_id}"
                 text = escape_markdown_v2(f"Користувач @{mention} отримав мут на 24 години за використання забороненого слова.")
                 reply = await message.reply(text, parse_mode="MarkdownV2")
                 await safe_delete_message(message)
