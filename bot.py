@@ -339,7 +339,7 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         user = chat_member.user
         if user.username:
             # Додаткове екранування підкреслення для надійності
-            escaped_username = escape_markdown_v2(user.username).replace('_', '\\_')
+            escaped_username = escape_markdown_v2(user.username).replace('_', '\\\_')
             mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
@@ -945,9 +945,9 @@ async def info_user(message: types.Message):
             punishment_list.append(punishment_text)
 
         if not punishment_list:
-            text = escape_markdown_v2(f"Користувач {username}\nUserID: {user_id}\nПокарань не знайдено.")
+            text = escape_markdown_v2(f"Користувач @{username}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
-            text = escape_markdown_v2(f"Користувач {username}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
+            text = escape_markdown_v2(f"Користувач @{username}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except Exception as e:
@@ -1202,7 +1202,7 @@ async def filter_messages(message: types.Message):
                 )
                 log_punishment(message.from_user.id, message.chat.id, "mute", f"Використання забороненого слова: {word}", duration_minutes=24*60, moderator_id=None)
                 mention = await get_user_mention(message.from_user.id, message.chat.id) or f"User {message.from_user.id}"
-                text = escape_markdown_v2(f"Користувач {mention} отримав мут на 24 години за використання забороненого слова.")
+                text = escape_markdown_v2(f"Користувач @{mention} отримав мут на 24 години за використання забороненого слова.")
                 reply = await message.reply(text, parse_mode="MarkdownV2")
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
