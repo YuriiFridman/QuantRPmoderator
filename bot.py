@@ -315,7 +315,7 @@ WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
@@ -912,12 +912,14 @@ async def info_user(message: types.Message):
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
 
-        mention = f"@{escape_markdown_v2(username)}"
+        # Додаткове екранування mention
+        mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+        mention = escape_markdown_v2(mention)  # Додаткове екранування
+
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
             chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-            mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
             mention += f" (не є учасником чату)"
@@ -1217,6 +1219,14 @@ async def filter_messages(message: types.Message):
                 await safe_delete_message(reply)
             break
 
+async def shutdown_handler():
+    logger.info("Received shutdown signal, shutting down gracefully...")
+    if telethon_client and telethon_client.is_connected():
+        await telethon_client.disconnect()
+        logger.info("Telethon client disconnected.")
+    await dp.stop_polling()
+    logger.info("Polling stopped. Exiting...")
+
 async def main():
     init_db()
     try:
@@ -1245,8 +1255,13 @@ async def main():
         logger.error(f"Критична помилка: {e}")
         raise
     finally:
-        if telethon_client and telethon_client.is_connected():
-            await telethon_client.disconnect()
+        await shutdown_handler()
 
 if __name__ == '__main__':
+    # Додаємо обробку SIGTERM
+    import signal
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_handler()))
+
     asyncio.run(main())
