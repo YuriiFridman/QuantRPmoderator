@@ -13,6 +13,8 @@ from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch, Channel, Chat
 from telethon.errors import FloodWaitError
+import atexit
+import time
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Завантаження змінних з .env
 load_dotenv()
+LOCK_FILE = "/tmp/bot_lock"
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(admin_id) for admin_id in os.getenv('ADMIN_IDS', '').split(',') if admin_id.strip()]
 API_ID = int(os.getenv('API_ID', '0'))
@@ -34,6 +37,25 @@ ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
 
+def acquire_lock():
+    while os.path.exists(LOCK_FILE):
+        logger.info("Другой экземпляр работает. Ожидание...")
+        time.sleep(5)  # Ждем перед следующей проверкой
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    logger.info(f"Блокировка получена с PID {os.getpid()}")
+
+def release_lock():
+    if os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE, "r") as f:
+            pid = int(f.read().strip())
+        if pid == os.getpid():
+            os.remove(LOCK_FILE)
+            logger.info(f"Блокировка освобождена для PID {pid}")
+
+atexit.register(release_lock)
+
+acquire_lock()
 # Ініціалізація бази даних SQLite
 def init_db():
     try:
@@ -335,7 +357,7 @@ def escape_markdown_v2_help(text: str) -> str:
 def escape_markdown_v2_info(text: str) -> str:
     if text is None:
         text = "Немає даних"
-    text = str(text)
+    text = str(text)  # Перетворюємо на рядок, щоб уникнути проблем із None або іншими типами
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
@@ -920,13 +942,14 @@ async def info_user(message: types.Message):
 
         punishments = get_punishments(user_id, message.chat.id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
+        logger.debug(f"Дані покарань: {punishments}")
 
         # Формуємо mention з коректним екрануванням
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
             chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-            mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
+            mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{escape_markdown_v2_info(str(user_id))}"
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
             mention = f"@{escape_markdown_v2_info(username)} \\(не є учасником чату\\)"
@@ -945,7 +968,7 @@ async def info_user(message: types.Message):
                 logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
                 moderator_mention = "Невідомий модератор"
             else:
-                moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{moderator_id}"
+                moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{escape_markdown_v2_info(str(moderator_id))}"
             try:
                 timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
             except ValueError:
@@ -1242,12 +1265,13 @@ async def filter_messages(message: types.Message):
             break
 
 async def shutdown_handler():
-    logger.info("Received shutdown signal, shutting down gracefully...")
+    logger.info("Получен сигнал завершения, завершение с сохранением состояния...")
+    release_lock()  # Освобождение блокировки перед отключением
     if telethon_client and telethon_client.is_connected():
         await telethon_client.disconnect()
-        logger.info("Telethon client disconnected.")
+        logger.info("Клиент Telethon отключен.")
     await dp.stop_polling()
-    logger.info("Polling stopped. Exiting...")
+    logger.info("Опрос остановлен. Выход...")
 
 async def main():
     init_db()
