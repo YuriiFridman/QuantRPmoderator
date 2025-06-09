@@ -895,7 +895,7 @@ async def info_user(message: types.Message):
         await safe_delete_message(reply)
         return
 
-    username = args[1].lstrip('@').replace('_', '\\_')
+    username = args[1].lstrip('@')
     try:
         async with telethon_client:
             try:
