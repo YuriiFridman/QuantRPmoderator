@@ -315,7 +315,7 @@ WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '__']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
