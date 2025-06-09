@@ -13,8 +13,6 @@ from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch, Channel, Chat
 from telethon.errors import FloodWaitError
-import atexit
-import time
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Завантаження змінних з .env
 load_dotenv()
-LOCK_FILE = "/tmp/bot_lock"
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(admin_id) for admin_id in os.getenv('ADMIN_IDS', '').split(',') if admin_id.strip()]
 API_ID = int(os.getenv('API_ID', '0'))
@@ -37,25 +34,6 @@ ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
 
-def acquire_lock():
-    while os.path.exists(LOCK_FILE):
-        logger.info("Другой экземпляр работает. Ожидание...")
-        time.sleep(5)  # Ждем перед следующей проверкой
-    with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))
-    logger.info(f"Блокировка получена с PID {os.getpid()}")
-
-def release_lock():
-    if os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE, "r") as f:
-            pid = int(f.read().strip())
-        if pid == os.getpid():
-            os.remove(LOCK_FILE)
-            logger.info(f"Блокировка освобождена для PID {pid}")
-
-atexit.register(release_lock)
-
-acquire_lock()
 # Ініціалізація бази даних SQLite
 def init_db():
     try:
@@ -337,7 +315,7 @@ WELCOME_MESSAGE = True
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
@@ -978,7 +956,6 @@ async def info_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('ad'))
 async def make_announcement(message: types.Message):
     if not has_moderator_privileges(message.from_user.id):
@@ -1240,15 +1217,6 @@ async def filter_messages(message: types.Message):
                 await safe_delete_message(reply)
             break
 
-async def shutdown_handler():
-    logger.info("Получен сигнал завершения, завершение с сохранением состояния...")
-    release_lock()  # Освобождение блокировки перед отключением
-    if telethon_client and telethon_client.is_connected():
-        await telethon_client.disconnect()
-        logger.info("Клиент Telethon отключен.")
-    await dp.stop_polling()
-    logger.info("Опрос остановлен. Выход...")
-
 async def main():
     init_db()
     try:
@@ -1277,13 +1245,8 @@ async def main():
         logger.error(f"Критична помилка: {e}")
         raise
     finally:
-        await shutdown_handler()
+        if telethon_client and telethon_client.is_connected():
+            await telethon_client.disconnect()
 
 if __name__ == '__main__':
-    # Додаємо обробку SIGTERM
-    import signal
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_handler()))
-
     asyncio.run(main())
