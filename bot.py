@@ -585,7 +585,7 @@ async def kick_user(message: types.Message):
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         log_punishment(user_id, message.chat.id, "kick", reason, moderator_id=message.from_user.id)
-        text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач @{mention} кікнутий з чату. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
