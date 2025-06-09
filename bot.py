@@ -934,7 +934,10 @@ async def info_user(message: types.Message):
                 logger.info(f"Отримано user_id={user_id} для username={username}")
             except ValueError as e:
                 logger.error(f"Не вдалося знайти користувача за username={username}: {e}")
-                reply = await message.reply(f"Користувач @{escape_markdown_v2_info(username)} не знайдений.", parse_mode="MarkdownV2")
+                reply = await message.reply(
+                    f"Користувач @{escape_markdown_v2_info(username)} не знайдений.",
+                    parse_mode="MarkdownV2"
+                )
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
@@ -952,7 +955,7 @@ async def info_user(message: types.Message):
             mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{escape_markdown_v2_info(str(user_id))}"
         except TelegramBadRequest as e:
             logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
-            mention = f"@{escape_markdown_v2_info(username)} \\(не є учасником чату\\)"
+            mention = f"@{escape_markdown_v2_info(username)}\\ \\(не є учасником чату\\)"
 
         punishment_list = []
         for p in punishments:
@@ -970,22 +973,21 @@ async def info_user(message: types.Message):
             else:
                 moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{escape_markdown_v2_info(str(moderator_id))}"
             try:
-                timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+                timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y\\-%m\\-%d %H\\:%M')
             except ValueError:
                 logger.warning(f"Некоректний формат timestamp={p['timestamp']} для user_id={user_id}, використовується як є")
-                timestamp = str(p["timestamp"])
+                timestamp = escape_markdown_v2_info(str(p["timestamp"]))
 
             # Екрануємо всі частини окремо
             punishment_type_escaped = escape_markdown_v2_info(punishment_type)
             duration_escaped = escape_markdown_v2_info(duration) if duration else ""
             reason_escaped = escape_markdown_v2_info(str(p['reason'] or "Немає причини"))
-            timestamp_escaped = escape_markdown_v2_info(timestamp)
             moderator_mention_escaped = moderator_mention  # Уже екранований у get_user_mention
-            punishment_text = f"{punishment_type_escaped}{duration_escaped} - Причина: {reason_escaped} (Видав: {moderator_mention_escaped}, {timestamp_escaped})"
+            punishment_text = f"{punishment_type_escaped}{duration_escaped} \\- Причина: {reason_escaped} \\(Видав: {moderator_mention_escaped}, {timestamp}\\)"
             punishment_list.append(punishment_text)
             logger.debug(f"Сформований рядок покарання: {repr(punishment_text)}")
 
-        # Формуємо текст без подвійного екранування
+        # Формуємо текст з коректним екрануванням
         user_id_escaped = escape_markdown_v2_info(str(user_id))
         if not punishment_list:
             text = f"Користувач {mention}\nUserID: {user_id_escaped}\nПокарань не знайдено."
@@ -996,9 +998,17 @@ async def info_user(message: types.Message):
         logger.debug(f"Сирий текст перед відправкою: {repr(text)}")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
+        await safe_delete_message(message)
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
     except Exception as e:
         logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
-        reply = await message.reply(f"Помилка при отриманні інформації про користувача @{escape_markdown_v2_info(username)}: {str(e)}", parse_mode="MarkdownV2")
+        # Екрануємо повідомлення про помилку
+        error_message = escape_markdown_v2_info(str(e))
+        reply = await message.reply(
+            f"Помилка при отриманні інформації про користувача @{escape_markdown_v2_info(username)}: {error_message}",
+            parse_mode="MarkdownV2"
+        )
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
