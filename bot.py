@@ -339,7 +339,7 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         user = chat_member.user
         if user.username:
             # Додаткове екранування підкреслення для надійності
-            escaped_username = escape_markdown_v2(user.username).replace('_', '\\_')
+            escaped_username = escape_markdown_v2(user.username).replace('_', '\_')
             mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
             return mention
@@ -944,6 +944,8 @@ async def info_user(message: types.Message):
             )
             punishment_list.append(punishment_text)
 
+        username = args[1].lstrip('@')
+        mention = f"@{escape_markdown_v2(username)}"
         if not punishment_list:
             text = escape_markdown_v2(f"Користувач {mention}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
