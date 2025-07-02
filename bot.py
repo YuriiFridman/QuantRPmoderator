@@ -1,9 +1,11 @@
 import asyncio
 import os
 import logging
-import sqlite3
 import re
 import datetime
+import asyncpg
+import ssl
+import certifi
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ChatPermissions, ChatMemberUpdated
@@ -27,268 +29,467 @@ API_HASH = os.getenv('API_HASH', '')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER', '')
 TWO_FACTOR_PASSWORD = os.getenv('TWO_FACTOR_PASSWORD', '')
 SESSION_PATH = os.getenv('SESSION_PATH', 'bot_session')
-DB_PATH = os.getenv('DB_PATH', 'moderators.db')
 AUDIO_PATH = os.getenv('AUDIO_PATH', 'QuantRP - ПРОЩАВАЙ.mp3')
 ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(',') if uid]
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_PORT = os.getenv('DB_PORT', '5432')
+DB_NAME = os.getenv('DB_NAME', 'quantRPmoderator_db')
+DB_USER = os.getenv('DB_USER', 'neondb_owner')
+DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+DB_SSLMODE = os.getenv('DB_SSLMODE', 'require')
 
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
 
-# Ініціалізація бази даних SQLite
-def init_db():
+
+# Ініціалізація бази даних PostgreSQL
+async def init_db():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS moderators (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS warnings (
-                user_id INTEGER,
-                chat_id INTEGER,
-                warn_count INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, chat_id)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bans (
-                user_id INTEGER,
-                chat_id INTEGER,
-                reason TEXT,
-                PRIMARY KEY (user_id, chat_id)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS punishments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                chat_id INTEGER,
-                punishment_type TEXT,
-                reason TEXT,
-                timestamp TIMESTAMP,
-                duration_minutes INTEGER,
-                moderator_id INTEGER,
-                FOREIGN KEY (user_id, chat_id) REFERENCES warnings (user_id, chat_id)
-            )
-        ''')
-        conn.commit()
+        # Налаштування SSL для Neon з використанням certifi
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+        conn = await asyncpg.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS moderators
+                           (
+                               user_id
+                               BIGINT
+                               PRIMARY
+                               KEY,
+                               username
+                               TEXT
+                           )
+                           ''')
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS warnings
+                           (
+                               user_id
+                               BIGINT,
+                               chat_id
+                               BIGINT,
+                               warn_count
+                               INTEGER
+                               DEFAULT
+                               0,
+                               PRIMARY
+                               KEY
+                           (
+                               user_id,
+                               chat_id
+                           )
+                               )
+                           ''')
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS bans
+                           (
+                               user_id
+                               BIGINT,
+                               chat_id
+                               BIGINT,
+                               reason
+                               TEXT,
+                               PRIMARY
+                               KEY
+                           (
+                               user_id,
+                               chat_id
+                           )
+                               )
+                           ''')
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS punishments
+                           (
+                               id
+                               SERIAL
+                               PRIMARY
+                               KEY,
+                               user_id
+                               BIGINT,
+                               chat_id
+                               BIGINT,
+                               punishment_type
+                               TEXT,
+                               reason
+                               TEXT,
+                               timestamp
+                               TIMESTAMP,
+                               duration_minutes
+                               INTEGER,
+                               moderator_id
+                               BIGINT
+                           )
+                           ''')
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS chat_settings
+                           (
+                               chat_id
+                               BIGINT
+                               PRIMARY
+                               KEY,
+                               filter_enabled
+                               BOOLEAN
+                               DEFAULT
+                               TRUE
+                           )
+                           ''')
         logger.info("База даних ініціалізована успішно.")
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка ініціалізації бази даних: {e}")
+        raise
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Завантаження модераторів із бази даних
-def load_moderators():
+async def load_moderators():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id FROM moderators')
-        moderators = {row[0] for row in cursor.fetchall()}
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        rows = await conn.fetch('SELECT user_id FROM moderators')
+        moderators = {row['user_id'] for row in rows}
         return moderators
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка завантаження модераторів: {e}")
         return set()
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Додавання модератора до бази даних
-def add_moderator_to_db(user_id: int, username: str = None):
+async def add_moderator_to_db(user_id: int, username: str = None):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR IGNORE INTO moderators (user_id, username) VALUES (?, ?)', (user_id, username))
-        conn.commit()
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute(
+            'INSERT INTO moderators (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING',
+            user_id, username
+        )
         logger.info(f"Додано модератора до бази: user_id={user_id}, username={username}")
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка додавання модератора до бази: {e}")
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Видалення модератора з бази даних
-def remove_moderator_from_db(user_id: int):
+async def remove_moderator_from_db(user_id: int):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM moderators WHERE user_id = ?', (user_id,))
-        conn.commit()
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute('DELETE FROM moderators WHERE user_id = $1', user_id)
         logger.info(f"Видалено модератора з бази: user_id={user_id}")
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка видалення модератора з бази: {e}")
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Перевірка, чи є користувач модератором
-def is_moderator(user_id: int) -> bool:
+async def is_moderator(user_id: int) -> bool:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT 1 FROM moderators WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone() is not None
-        return result
-    except sqlite3.Error as e:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        result = await conn.fetchval('SELECT 1 FROM moderators WHERE user_id = $1', user_id)
+        return bool(result)
+    except Exception as e:
         logger.error(f"Помилка перевірки модератора: {e}")
         return False
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
 
-# Отримання username модератора з бази даних
-def get_moderator_username(user_id: int) -> str | None:
+
+# Отримання username модератора
+async def get_moderator_username(user_id: int) -> str | None:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT username FROM moderators WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
-    except sqlite3.Error as e:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        result = await conn.fetchval('SELECT username FROM moderators WHERE user_id = $1', user_id)
+        return result
+    except Exception as e:
         logger.error(f"Помилка отримання username модератора: {e}")
         return None
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Додавання попередження
-def add_warning(user_id: int, chat_id: int) -> int:
+async def add_warning(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO warnings (user_id, chat_id, warn_count)
-            VALUES (?, ?, COALESCE((SELECT warn_count FROM warnings WHERE user_id = ? AND chat_id = ?), 0) + 1)
-        ''', (user_id, chat_id, user_id, chat_id))
-        conn.commit()
-        cursor.execute('SELECT warn_count FROM warnings WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        warn_count = cursor.fetchone()[0]
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        warn_count = await conn.fetchval('''
+                                         INSERT INTO warnings (user_id, chat_id, warn_count)
+                                         VALUES ($1, $2, 1) ON CONFLICT (user_id, chat_id)
+            DO
+                                         UPDATE SET warn_count = warnings.warn_count + 1
+                                             RETURNING warn_count
+                                         ''', user_id, chat_id)
         logger.info(f"Додано попередження: user_id={user_id}, chat_id={chat_id}, warn_count={warn_count}")
         return warn_count
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка додавання попередження: {e}")
         return 0
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Зняття попередження
-def remove_warning(user_id: int, chat_id: int) -> int:
+async def remove_warning(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE warnings SET warn_count = warn_count - 1
-            WHERE user_id = ? AND chat_id = ? AND warn_count > 0
-        ''', (user_id, chat_id))
-        if conn.total_changes == 0:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        warn_count = await conn.fetchval('''
+                                         UPDATE warnings
+                                         SET warn_count = warn_count - 1
+                                         WHERE user_id = $1
+                                           AND chat_id = $2
+                                           AND warn_count > 0 RETURNING warn_count
+                                         ''', user_id, chat_id)
+        if warn_count is None:
             return 0
-        cursor.execute('SELECT warn_count FROM warnings WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        warn_count = cursor.fetchone()[0]
         if warn_count == 0:
-            cursor.execute('DELETE FROM warnings WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        conn.commit()
+            await conn.execute('DELETE FROM warnings WHERE user_id = $1 AND chat_id = $2', user_id, chat_id)
         logger.info(f"Знято попередження: user_id={user_id}, chat_id={chat_id}, warn_count={warn_count}")
         return warn_count
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка зняття попередження: {e}")
         return 0
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Додавання бана
-def add_ban(user_id: int, chat_id: int, reason: str):
+async def add_ban(user_id: int, chat_id: int, reason: str):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO bans (user_id, chat_id, reason) VALUES (?, ?, ?)', (user_id, chat_id, reason))
-        conn.commit()
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute(
+            'INSERT INTO bans (user_id, chat_id, reason) VALUES ($1, $2, $3) ON CONFLICT (user_id, chat_id) DO UPDATE SET reason = $3',
+            user_id, chat_id, reason
+        )
         logger.info(f"Додано бан: user_id={user_id}, chat_id={chat_id}, reason={reason}")
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка додавання бана: {e}")
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Зняття бана
-def remove_ban(user_id: int, chat_id: int):
+async def remove_ban(user_id: int, chat_id: int):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM bans WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        conn.commit()
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute('DELETE FROM bans WHERE user_id = $1 AND chat_id = $2', user_id, chat_id)
         logger.info(f"Знято бан: user_id={user_id}, chat_id={chat_id}")
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка зняття бана: {e}")
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Отримання кількості попереджень
-def get_warning_count(user_id: int, chat_id: int) -> int:
+async def get_warning_count(user_id: int, chat_id: int) -> int:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT warn_count FROM warnings WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        result = cursor.fetchone()
-        return result[0] if result else 0
-    except sqlite3.Error as e:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        result = await conn.fetchval(
+            'SELECT warn_count FROM warnings WHERE user_id = $1 AND chat_id = $2', user_id, chat_id
+        )
+        return result if result is not None else 0
+    except Exception as e:
         logger.error(f"Помилка отримання попереджень: {e}")
         return 0
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Логування покарань
-def log_punishment(user_id: int, chat_id: int, punishment_type: str, reason: str, duration_minutes: int | None = None, moderator_id: int | None = None):
+async def log_punishment(user_id: int, chat_id: int, punishment_type: str, reason: str,
+                         duration_minutes: int | None = None, moderator_id: int | None = None):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO punishments (user_id, chat_id, punishment_type, reason, timestamp, duration_minutes, moderator_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, punishment_type, reason, datetime.datetime.now(), duration_minutes, moderator_id))
-        conn.commit()
-        logger.info(f"Залоговано покарання: user_id={user_id}, chat_id={chat_id}, type={punishment_type}, reason={reason}, duration={duration_minutes}, moderator_id={moderator_id}")
-    except sqlite3.Error as e:
-        logger.error(f"Помилка логування покарання: {e}")
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute('''
+                           INSERT INTO punishments (user_id, chat_id, punishment_type, reason, timestamp,
+                                                    duration_minutes, moderator_id)
+                           VALUES ($1, $2, $3, $4, NOW(), $5, $6)
+                           ''', user_id, chat_id, punishment_type, reason, duration_minutes, moderator_id)
+        logger.info(
+            f"Залоговано покарання: user_id={user_id}, chat_id={chat_id}, type={punishment_type}, reason={reason}, duration={duration_minutes}, moderator_id={moderator_id}")
+    except Exception as e:
+        logger.error(
+            f"Помилка логування покарання для user_id={user_id}, chat_id={chat_id}, type={punishment_type}: {e}")
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
 
 # Отримання історії покарань
-def get_punishments(user_id: int, chat_id: int) -> list:
+async def get_punishments(user_id: int, chat_id: int) -> list:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT punishment_type, reason, timestamp, duration_minutes, moderator_id
-            FROM punishments
-            WHERE user_id = ? AND chat_id = ?
-            ORDER BY timestamp DESC
-        ''', (user_id, chat_id))
-        punishments = cursor.fetchall()
-        logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={chat_id}: {len(punishments)} записів")
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        rows = await conn.fetch('''
+                                SELECT punishment_type, reason, timestamp, duration_minutes, moderator_id
+                                FROM punishments
+                                WHERE user_id = $1
+                                  AND chat_id = $2
+                                ORDER BY timestamp DESC
+                                ''', user_id, chat_id)
+        logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={chat_id}: {len(rows)} записів")
         return [
             {
-                "type": p[0],
-                "reason": p[1],
-                "timestamp": p[2],
-                "duration_minutes": p[3],
-                "moderator_id": p[4]
-            } for p in punishments
+                "type": row['punishment_type'],
+                "reason": row['reason'],
+                "timestamp": row['timestamp'].strftime('%Y-%m-%d %H:%M'),
+                "duration_minutes": row['duration_minutes'],
+                "moderator_id": row['moderator_id']
+            } for row in rows
         ]
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Помилка отримання історії покарань: {e}")
         return []
     finally:
         if 'conn' in locals():
-            conn.close()
+            await conn.close()
+
+
+# Отримання статусу фільтра
+async def get_filter_status(chat_id: int) -> bool:
+    try:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        result = await conn.fetchval('SELECT filter_enabled FROM chat_settings WHERE chat_id = $1', chat_id)
+        return result if result is not None else True
+    except Exception as e:
+        logger.error(f"Помилка отримання статусу фільтра для chat_id={chat_id}: {e}")
+        return True
+    finally:
+        if 'conn' in locals():
+            await conn.close()
+
+
+# Встановлення статусу фільтра
+async def set_filter_status(chat_id: int, enabled: bool):
+    try:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute(
+            'INSERT INTO chat_settings (chat_id, filter_enabled) VALUES ($1, $2) ON CONFLICT (chat_id) DO UPDATE SET filter_enabled = $2',
+            chat_id, enabled
+        )
+        logger.info(f"Оновлено статус фільтра для chat_id={chat_id}: {enabled}")
+    except Exception as e:
+        logger.error(f"Помилка збереження статусу фільтра для chat_id={chat_id}: {e}")
+    finally:
+        if 'conn' in locals():
+            await conn.close()
+
 
 # Зчитування заборонених слів із файлу
 def load_forbidden_words(file_path='forbidden_words.txt'):
@@ -302,16 +503,15 @@ def load_forbidden_words(file_path='forbidden_words.txt'):
         logger.error(f"Помилка зчитування заборонених слів: {e}")
         return set()
 
+
 # Ініціалізація бота
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # Список заборонених слів
 FORBIDDEN_WORDS = load_forbidden_words()
-FORBIDDEN_WORDS_FILTER = True
-
-# Налаштування привітання
 WELCOME_MESSAGE = True
+
 
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
@@ -320,11 +520,13 @@ def escape_markdown_v2(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
+
 def escape_markdown_v2_rules(text: str) -> str:
     special_chars = ['_', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
 
 def escape_markdown_v2_help(text: str) -> str:
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '>']
@@ -332,13 +534,13 @@ def escape_markdown_v2_help(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
+
 # Функція для створення згадки користувача
 async def get_user_mention(user_id: int, chat_id: int) -> str | None:
     try:
         chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         user = chat_member.user
         if user.username:
-            # Додаткове екранування підкреслення для надійності
             escaped_username = escape_markdown_v2(user.username).replace('_', '\\_')
             mention = f"@{escaped_username}"
             logger.info(f"Створено згадку: {mention} для user_id={user_id}, username={user.username}")
@@ -352,6 +554,7 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         logger.warning(f"Помилка при отриманні користувача {user_id} у чаті {chat_id}: {e}")
         return f"ID\\:{user_id}"
 
+
 # Функція для безпечного видалення повідомлення
 async def safe_delete_message(message: types.Message):
     try:
@@ -359,6 +562,7 @@ async def safe_delete_message(message: types.Message):
         logger.info(f"Видалено повідомлення: message_id={message.message_id}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.warning(f"Не вдалося видалити повідомлення {message.message_id}: {e}")
+
 
 # Функція для отримання user_id, username і причини
 async def get_user_data(message: types.Message, args: list) -> tuple[int, str | None, str] | None:
@@ -395,13 +599,16 @@ async def get_user_data(message: types.Message, args: list) -> tuple[int, str | 
     logger.error("Невірний формат команди: не вказано user_id або reply")
     return None
 
+
 # Перевірка прав модератора або адміністратора
 def has_moderator_privileges(user_id: int) -> bool:
-    return user_id in ADMIN_IDS or is_moderator(user_id)
+    return user_id in ADMIN_IDS or asyncio.run(is_moderator(user_id))
+
 
 # Перевірка, чи має користувач доступ до /get_users
 def is_allowed_user(user_id: int) -> bool:
     return user_id in ALLOWED_USER_IDS
+
 
 # Функція для отримання всіх учасників чату
 async def get_all_participants(chat_id: int) -> list:
@@ -437,6 +644,7 @@ async def get_all_participants(chat_id: int) -> list:
         logger.error(f"Помилка при отриманні учасників для чату {chat_id}: {str(e)}")
     return members
 
+
 # Обробники команд
 @dp.message(Command('welcome'))
 async def toggle_welcome(message: types.Message):
@@ -456,9 +664,9 @@ async def toggle_welcome(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Змінено статус привітань: {status}")
 
+
 @dp.message(Command('filter'))
 async def toggle_filter(message: types.Message):
-    global FORBIDDEN_WORDS_FILTER
     if not has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
@@ -466,13 +674,18 @@ async def toggle_filter(message: types.Message):
         await safe_delete_message(reply)
         return
 
-    FORBIDDEN_WORDS_FILTER = not FORBIDDEN_WORDS_FILTER
-    status = "✅ увімкнено" if FORBIDDEN_WORDS_FILTER else "❌ вимкнено"
+    chat_id = message.chat.id
+    current_status = await get_filter_status(chat_id)
+    new_status = not current_status
+    await set_filter_status(chat_id, new_status)
+
+    status = "✅ увімкнено" if new_status else "❌ вимкнено"
     reply = await message.reply(f"Фільтрація заборонених слів {status}")
     await safe_delete_message(message)
     await asyncio.sleep(25)
     await safe_delete_message(reply)
-    logger.info(f"Змінено статус фільтрації заборонених слів: {status}")
+    logger.info(f"Змінено статус фільтрації заборонених слів для chat_id={chat_id}: {status}")
+
 
 @dp.message(Command('addmoder'))
 async def add_moderator(message: types.Message):
@@ -486,22 +699,24 @@ async def add_moderator(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id у форматі /addmoder 123456789 або відповідайте на повідомлення користувача.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id у форматі /addmoder 123456789 або відповідайте на повідомлення користувача.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, _ = user_data
-    if is_moderator(user_id):
+    if await is_moderator(user_id):
         mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        reply = await message.reply(f"Користувач {escape_markdown_v2(mention)} уже є модератором.", parse_mode="MarkdownV2")
+        reply = await message.reply(f"Користувач {escape_markdown_v2(mention)} уже є модератором.",
+                                    parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
-    add_moderator_to_db(user_id, username)
+    await add_moderator_to_db(user_id, username)
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
     text = escape_markdown_v2(f"Користувач {mention} доданий до списку модераторів.")
     reply = await message.reply(text, parse_mode="MarkdownV2")
@@ -509,6 +724,7 @@ async def add_moderator(message: types.Message):
     await asyncio.sleep(25)
     await safe_delete_message(reply)
     logger.info(f"Додано модератора: user_id={user_id}, username={username}, chat_id={message.chat.id}")
+
 
 @dp.message(Command('removemoder'))
 async def remove_moderator(message: types.Message):
@@ -522,22 +738,24 @@ async def remove_moderator(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id у форматі /removemoder 123456789 або відповідайте на повідомлення користувача.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id у форматі /removemoder 123456789 або відповідайте на повідомлення користувача.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, _ = user_data
-    if not is_moderator(user_id):
+    if not await is_moderator(user_id):
         mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
-        reply = await message.reply(f"Користувач {escape_markdown_v2(mention)} не є модератором.", parse_mode="MarkdownV2")
+        reply = await message.reply(f"Користувач {escape_markdown_v2(mention)} не є модератором.",
+                                    parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
-    remove_moderator_from_db(user_id)
+    await remove_moderator_from_db(user_id)
     mention = await get_user_mention(user_id, message.chat.id) or f"ID\\:{user_id}"
     text = escape_markdown_v2(f"Користувач {mention} видалений зі списку модераторів.")
     reply = await message.reply(text, parse_mode="MarkdownV2")
@@ -545,6 +763,7 @@ async def remove_moderator(message: types.Message):
     await asyncio.sleep(25)
     await safe_delete_message(reply)
     logger.info(f"Видалено модератора: user_id={user_id}, username={username}, chat_id={message.chat.id}")
+
 
 @dp.message(Command('kick'))
 async def kick_user(message: types.Message):
@@ -558,21 +777,22 @@ async def kick_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id і причину у форматі /kick 123456789 причина або відповідайте на повідомлення користувача з /kick причина.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id і причину у форматі /kick 123456789 причина або відповідайте на повідомлення користувача з /kick причина.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, reason = user_data
-    mention = f"{username}" or f"ID\\:{user_id}"
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
 
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
                 audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач @{mention} отримує кік! 🎵 Причина: {reason}"),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
             logger.info(f"Надіслано музику перед кік для user_id={user_id} у чаті {message.chat.id}")
@@ -584,19 +804,21 @@ async def kick_user(message: types.Message):
 
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
-        log_punishment(user_id, message.chat.id, "kick", reason, moderator_id=message.from_user.id)
-        text = escape_markdown_v2(f"Користувач @{mention} кікнутий з чату. Причина: {reason}.")
+        await log_punishment(user_id, message.chat.id, "kick", reason, moderator_id=message.from_user.id)
+        text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Кікнуто користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
+        logger.info(
+            f"Кікнуто користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при кіку користувача {user_id}: {e}")
         reply = await message.reply(f"Не вдалося кікнути користувача: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('warn'))
 async def warn_user(message: types.Message):
@@ -610,26 +832,29 @@ async def warn_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id і причину у форматі /warn 123456789 причина або відповідайте на повідомлення користувача з /warn причина.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id і причину у форматі /warn 123456789 причина або відповідайте на повідомлення користувача з /warn причина.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, reason = user_data
-    warn_count = add_warning(user_id, message.chat.id)
-    mention = f"{username}" or f"ID\\:{user_id}"
-    log_punishment(user_id, message.chat.id, "warn", reason, moderator_id=message.from_user.id)
+    warn_count = await add_warning(user_id, message.chat.id)
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
+    await log_punishment(user_id, message.chat.id, "warn", reason, moderator_id=message.from_user.id)
     if warn_count >= 3:
         try:
             await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
-            log_punishment(user_id, message.chat.id, "kick", "3 попередження", moderator_id=message.from_user.id)
-            text = escape_markdown_v2(f"Користувач @{mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
+            await log_punishment(user_id, message.chat.id, "kick", "3 попередження", moderator_id=message.from_user.id)
+            text = escape_markdown_v2(
+                f"Користувач {mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
             reply = await message.reply(text, parse_mode="MarkdownV2")
             await safe_delete_message(message)
             await asyncio.sleep(25)
             await safe_delete_message(reply)
-            logger.info(f"Кікнуто за 3 попередження: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
+            logger.info(
+                f"Кікнуто за 3 попередження: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
         except TelegramBadRequest as e:
             logger.error(f"Помилка при кіку користувача {user_id}: {e}")
             reply = await message.reply(f"Не вдалося кікнути користувача: {e.message}")
@@ -637,12 +862,14 @@ async def warn_user(message: types.Message):
             await asyncio.sleep(25)
             await safe_delete_message(reply)
     else:
-        text = escape_markdown_v2(f"Користувач @{mention} отримав попередження {warn_count}/3. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач {mention} отримав попередження {warn_count}/3. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Видано попередження: user_id={user_id}, username={username}, warn_count={warn_count}, reason={reason}, chat_id={message.chat.id}")
+        logger.info(
+            f"Видано попередження: user_id={user_id}, username={username}, warn_count={warn_count}, reason={reason}, chat_id={message.chat.id}")
+
 
 @dp.message(Command('ban'))
 async def ban_user(message: types.Message):
@@ -656,21 +883,22 @@ async def ban_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id і причину у форматі /ban 123456789 причина або відповідайте на повідомлення користувача з /ban причина.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id і причину у форматі /ban 123456789 причина або відповідайте на повідомлення користувача з /ban причина.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, reason = user_data
-    mention = f"{username}" or f"ID\\:{user_id}"
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
 
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
                 chat_id=message.chat.id,
                 audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач @{mention} отримує бан! 🎵 Причина: {reason}"),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
                 parse_mode="MarkdownV2"
             )
             logger.info(f"Надіслано музику перед бан для user_id={user_id} у чаті {message.chat.id}")
@@ -682,20 +910,22 @@ async def ban_user(message: types.Message):
 
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
-        add_ban(user_id, message.chat.id, reason)
-        log_punishment(user_id, message.chat.id, "ban", reason, moderator_id=message.from_user.id)
-        text = escape_markdown_v2(f"Користувач @{mention} забанений. Причина: {reason}.")
+        await add_ban(user_id, message.chat.id, reason)
+        await log_punishment(user_id, message.chat.id, "ban", reason, moderator_id=message.from_user.id)
+        text = escape_markdown_v2(f"Користувач {mention} забанений. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Забанено користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
+        logger.info(
+            f"Забанено користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при бану користувача {user_id}: {e}")
         reply = await message.reply(f"Не вдалося забанить користувача: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('mute'))
 async def mute_user(message: types.Message):
@@ -718,7 +948,8 @@ async def mute_user(message: types.Message):
         minutes = int(args[0])
         reason = ' '.join(args[1:])
     else:
-        reply = await message.reply("Будь ласка, вкажіть user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача з /mute 60 причина.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача з /mute 60 причина.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -726,7 +957,8 @@ async def mute_user(message: types.Message):
 
     user_data = await get_user_data(message, args if user_id else args[1:])
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть коректний user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть коректний user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -748,20 +980,23 @@ async def mute_user(message: types.Message):
             ),
             until_date=mute_until
         )
-        log_punishment(user_id, message.chat.id, "mute", reason, duration_minutes=minutes, moderator_id=message.from_user.id)
-        mention = f"{username}" or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Користувач @{mention} отримав мут на {minutes} хвилин. Причина: {reason}.")
+        await log_punishment(user_id, message.chat.id, "mute", reason, duration_minutes=minutes,
+                             moderator_id=message.from_user.id)
+        mention = f"@{username}" if username else f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Користувач {mention} отримав мут на {minutes} хвилин. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Видано мут: user_id={user_id}, username={username}, minutes={minutes}, reason={reason}, chat_id={message.chat.id}")
+        logger.info(
+            f"Видано мут: user_id={user_id}, username={username}, minutes={minutes}, reason={reason}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при муті користувача {user_id}: {e}")
         reply = await message.reply(f"Не вдалося видати мут: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('unmute'))
 async def unmute_user(message: types.Message):
@@ -775,7 +1010,8 @@ async def unmute_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id у форматі /unmute 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину.")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id у форматі /unmute 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -793,8 +1029,8 @@ async def unmute_user(message: types.Message):
                 can_send_other_messages=True
             )
         )
-        mention = f"{username}" or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Знято мут із користувача @{mention}.")
+        mention = f"@{username}" if username else f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Знято мут із користувача {mention}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -806,6 +1042,7 @@ async def unmute_user(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('unwarn'))
 async def unwarn_user(message: types.Message):
@@ -819,28 +1056,31 @@ async def unwarn_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id у форматі /unwarn 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id у форматі /unwarn 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
 
     user_id, username, _ = user_data
-    warn_count = remove_warning(user_id, message.chat.id)
-    mention = f"{username}" or f"ID\\:{user_id}"
+    warn_count = await remove_warning(user_id, message.chat.id)
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
     if warn_count >= 0:
-        text = escape_markdown_v2(f"Знято попередження з користувача @{mention}. Залишилось {warn_count}/3.")
+        text = escape_markdown_v2(f"Знято попередження з користувача {mention}. Залишилось {warn_count}/3.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Знято попередження: user_id={user_id}, username={username}, warn_count={warn_count}, chat_id={message.chat.id}")
+        logger.info(
+            f"Знято попередження: user_id={user_id}, username={username}, warn_count={warn_count}, chat_id={message.chat.id}")
     else:
-        text = escape_markdown_v2(f"У користувача @{mention} немає попереджень.")
+        text = escape_markdown_v2(f"У користувача {mention} немає попереджень.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('unban'))
 async def unban_user(message: types.Message):
@@ -854,7 +1094,8 @@ async def unban_user(message: types.Message):
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
-        reply = await message.reply("Будь ласка, вкажіть user_id у форматі /unban 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину")
+        reply = await message.reply(
+            "Будь ласка, вкажіть user_id у форматі /unban 123456789 Причину або відповідайте на повідомлення користувача і вкажіть причину")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -863,9 +1104,9 @@ async def unban_user(message: types.Message):
     user_id, username, _ = user_data
     try:
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=user_id)
-        remove_ban(user_id, message.chat.id)
-        mention = f"{username}" or f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Знято бан із користувача @{mention}.")
+        await remove_ban(user_id, message.chat.id)
+        mention = f"@{username}" if username else f"ID\\:{user_id}"
+        text = escape_markdown_v2(f"Знято бан із користувача {mention}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -877,6 +1118,7 @@ async def unban_user(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('info'))
 async def info_user(message: types.Message):
@@ -910,17 +1152,19 @@ async def info_user(message: types.Message):
                 await safe_delete_message(reply)
                 return
 
-        punishments = get_punishments(user_id, message.chat.id)
-        logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={message.chat.id}: {len(punishments)} записів")
+        punishments = await get_punishments(user_id, message.chat.id)
+        logger.info(
+            f"Запитано історію покарань: user_id={user_id}, chat_id={message.chat.id}, знайдено {len(punishments)} записів")
 
         mention = f"@{escape_markdown_v2(username)}"
         try:
             logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={message.chat.id}")
             chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
             logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-            mention = f"{username}" or f"ID\\:{user_id}"
+            mention = f"@{username}" if username else f"ID\\:{user_id}"
         except TelegramBadRequest as e:
-            logger.warning(f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
+            logger.warning(
+                f"Користувач user_id={user_id} не є учасником чату {message.chat.id} або виникла помилка: {e}")
             mention += f" (не є учасником чату)"
 
         punishment_list = []
@@ -931,31 +1175,34 @@ async def info_user(message: types.Message):
                 "warn": "Попередження",
                 "mute": "Мут"
             }.get(p["type"], p["type"])
-            duration = f" ({p['duration_minutes']} хвилин)" if p["duration_minutes"] else ""
+            duration = f" ({p['duration_minutes']} хвилин)" if p['duration_minutes'] else ""
             moderator_id = p["moderator_id"]
             if moderator_id is None or not isinstance(moderator_id, int):
                 logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
                 moderator_mention = "Невідомий модератор"
             else:
                 moderator_mention = await get_user_mention(moderator_id, message.chat.id) or f"ID\\:{moderator_id}"
-            timestamp = datetime.datetime.strptime(p["timestamp"], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
             punishment_text = escape_markdown_v2(
-                f"{punishment_type}{duration} - Причина: {p['reason']} (Видав: {moderator_mention}, {timestamp})"
+                f"{punishment_type}{duration} - Причина: {p['reason']} (Видав: {moderator_mention}, {p['timestamp']})"
             )
             punishment_list.append(punishment_text)
 
         if not punishment_list:
             text = escape_markdown_v2(f"Користувач @{username}\nUserID: {user_id}\nПокарань не знайдено.")
         else:
-            text = escape_markdown_v2(f"Користувач @{username}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(punishment_list)
+            text = escape_markdown_v2(f"Користувач @{username}\nUserID: {user_id}\n\nІсторія покарань:\n") + '\n'.join(
+                punishment_list)
         reply = await message.reply(text, parse_mode="MarkdownV2")
-        logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
+        logger.info(
+            f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except Exception as e:
         logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
-        reply = await message.reply(f"Помилка при отриманні інформації про користувача @{escape_markdown_v2(username)}: {str(e)}")
+        reply = await message.reply(
+            f"Помилка при отриманні інформації про користувача @{escape_markdown_v2(username)}: {str(e)}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('ad'))
 async def make_announcement(message: types.Message):
@@ -992,7 +1239,8 @@ async def make_announcement(message: types.Message):
     try:
         first_chunk = participant_chunks[0] if participant_chunks else []
         mentions = ' '.join(first_chunk)
-        full_text = escape_markdown_v2(f"📢 Оголошення:\n{announcement_text}\n\n{mentions}" if mentions else f"📢 Оголошення:\n{announcement_text}")
+        full_text = escape_markdown_v2(
+            f"📢 Оголошення:\n{announcement_text}\n\n{mentions}" if mentions else f"📢 Оголошення:\n{announcement_text}")
         sent_message = await bot.send_message(
             chat_id=chat_id,
             text=full_text,
@@ -1025,6 +1273,7 @@ async def make_announcement(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+
 
 @dp.message(Command('get_users'))
 async def get_users(message: types.Message):
@@ -1066,19 +1315,21 @@ async def get_users(message: types.Message):
         if os.path.exists(filename):
             os.remove(filename)
 
+
 @dp.chat_member()
 async def welcome_new_member(update: ChatMemberUpdated):
     user = update.new_chat_member.user
     old_status = getattr(update.old_chat_member, 'status', 'none')
     new_status = update.new_chat_member.status
-    logger.info(f"Отримано подію chat_member: user_id={user.id}, old_status={old_status}, new_status={new_status}, chat_id={update.chat.id}")
+    logger.info(
+        f"Отримано подію chat_member: user_id={user.id}, old_status={old_status}, new_status={new_status}, chat_id={update.chat.id}")
     if (WELCOME_MESSAGE and new_status in ["member", "restricted"] and
             (update.old_chat_member is None or old_status in ["left", "kicked"])):
         try:
-            mention = f"{user.username}" or f"ID\\:{user.user_id}"
+            mention = f"@{user.username}" if user.username else f"ID\\:{user.id}"
             chat = await bot.get_chat(update.chat.id)
             chat_username = f"@{chat.username}" if chat.username else f"ID:{update.chat.first_name}"
-            text = escape_markdown_v2(f"Вітаємо, @{mention}! Ласкаво просимо до {chat_username}! 😊")
+            text = escape_markdown_v2(f"Вітаємо, {mention}! Ласкаво просимо до {chat_username}! 😊")
             await bot.send_message(
                 chat_id=update.chat.id,
                 text=text,
@@ -1091,6 +1342,7 @@ async def welcome_new_member(update: ChatMemberUpdated):
                 logger.info(f"Відправлено дебаг-повідомлення для {user.id}")
             except Exception as debug_e:
                 logger.error(f"Помилка дебаг-повідомлення для {user.id}: {debug_e}")
+
 
 @dp.message(Command('rules'))
 async def show_rules(message: types.Message):
@@ -1130,6 +1382,7 @@ async def show_rules(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
+
 @dp.message(Command('help'))
 async def show_help(message: types.Message):
     is_mod = has_moderator_privileges(message.from_user.id)
@@ -1167,7 +1420,8 @@ async def show_help(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
+        logger.info(
+            f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
     except TelegramBadRequest as e:
         logger.error(f"Помилка при надсиланні списку команд для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні команд. Спробуйте ще раз.")
@@ -1175,9 +1429,11 @@ async def show_help(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
+
 @dp.message()
 async def filter_messages(message: types.Message):
-    if not FORBIDDEN_WORDS_FILTER or not message.text:
+    chat_id = message.chat.id
+    if not await get_filter_status(chat_id) or not message.text:
         return
     message_text = message.text.lower()
     for word in FORBIDDEN_WORDS:
@@ -1195,18 +1451,22 @@ async def filter_messages(message: types.Message):
                     ),
                     until_date=mute_until
                 )
-                log_punishment(message.from_user.id, message.chat.id, "mute", f"Використання забороненого слова: {word}", duration_minutes=24*60, moderator_id=None)
-
-                mention = f"{user.username}" or f"ID\\:{user.user_id}"
-                text = escape_markdown_v2(f"Користувач @{mention} отримав мут на 24 години за використання забороненого слова.")
+                await log_punishment(
+                    message.from_user.id, message.chat.id, "mute",
+                    f"Використання забороненого слова: {word}", duration_minutes=24 * 60, moderator_id=None
+                )
+                mention = f"@{message.from_user.username}" if message.from_user.username else f"ID\\:{message.from_user.id}"
+                text = escape_markdown_v2(
+                    f"Користувач {mention} отримав мут на 24 години за використання забороненого слова.")
                 reply = await message.reply(text, parse_mode="MarkdownV2")
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
-                logger.info(f"Користувач {message.from_user.id} отримав мут за слово '{word}'")
+                logger.info(f"Користувач {message.from_user.id} отримав мут за слово '{word}' у чаті {chat_id}")
             except TelegramBadRequest as e:
                 logger.error(f"Помилка при муті користувача {message.from_user.id}: {e}")
-                mention = await get_user_mention(message.from_user.id, message.chat.id) or f"User {message.from_user.id}"
+                mention = await get_user_mention(message.from_user.id,
+                                                 message.chat.id) or f"User {message.from_user.id}"
                 error_text = escape_markdown_v2(f"Помилка при видачі мута для {mention}: {str(e)}")
                 reply = await bot.send_message(message.chat.id, error_text, parse_mode="MarkdownV2")
                 await safe_delete_message(message)
@@ -1214,8 +1474,9 @@ async def filter_messages(message: types.Message):
                 await safe_delete_message(reply)
             break
 
+
 async def main():
-    init_db()
+    await init_db()
     try:
         if telethon_client:
             async def phone_input():
