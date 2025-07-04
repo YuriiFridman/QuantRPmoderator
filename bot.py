@@ -41,11 +41,9 @@ DB_SSLMODE = os.getenv('DB_SSLMODE', 'require')
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
 
-
 # Ініціалізація бази даних PostgreSQL
 async def init_db():
     try:
-        # Налаштування SSL для Neon з використанням certifi
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         if DB_SSLMODE == 'require':
             ssl_context.check_hostname = True
@@ -60,88 +58,45 @@ async def init_db():
             ssl=ssl_context if DB_SSLMODE == 'require' else None
         )
         await conn.execute('''
-                           CREATE TABLE IF NOT EXISTS moderators
-                           (
-                               user_id
-                               BIGINT
-                               PRIMARY
-                               KEY,
-                               username
-                               TEXT
-                           )
-                           ''')
+            CREATE TABLE IF NOT EXISTS moderators (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT
+            )
+        ''')
         await conn.execute('''
-                           CREATE TABLE IF NOT EXISTS warnings
-                           (
-                               user_id
-                               BIGINT,
-                               chat_id
-                               BIGINT,
-                               warn_count
-                               INTEGER
-                               DEFAULT
-                               0,
-                               PRIMARY
-                               KEY
-                           (
-                               user_id,
-                               chat_id
-                           )
-                               )
-                           ''')
+            CREATE TABLE IF NOT EXISTS warnings (
+                user_id BIGINT,
+                chat_id BIGINT,
+                warn_count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        ''')
         await conn.execute('''
-                           CREATE TABLE IF NOT EXISTS bans
-                           (
-                               user_id
-                               BIGINT,
-                               chat_id
-                               BIGINT,
-                               reason
-                               TEXT,
-                               PRIMARY
-                               KEY
-                           (
-                               user_id,
-                               chat_id
-                           )
-                               )
-                           ''')
+            CREATE TABLE IF NOT EXISTS bans (
+                user_id BIGINT,
+                chat_id BIGINT,
+                reason TEXT,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        ''')
         await conn.execute('''
-                           CREATE TABLE IF NOT EXISTS punishments
-                           (
-                               id
-                               SERIAL
-                               PRIMARY
-                               KEY,
-                               user_id
-                               BIGINT,
-                               chat_id
-                               BIGINT,
-                               punishment_type
-                               TEXT,
-                               reason
-                               TEXT,
-                               timestamp
-                               TIMESTAMP,
-                               duration_minutes
-                               INTEGER,
-                               moderator_id
-                               BIGINT
-                           )
-                           ''')
+            CREATE TABLE IF NOT EXISTS punishments (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                chat_id BIGINT,
+                punishment_type TEXT,
+                reason TEXT,
+                timestamp TIMESTAMP,
+                duration_minutes INTEGER,
+                moderator_id BIGINT
+            )
+        ''')
         await conn.execute('''
-                           CREATE TABLE IF NOT EXISTS chat_settings
-                           (
-                               chat_id
-                               BIGINT
-                               PRIMARY
-                               KEY,
-                               filter_enabled
-                               BOOLEAN
-                               DEFAULT
-                               TRUE
-                           )
-                           ''')
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id BIGINT PRIMARY KEY,
+                filter_enabled BOOLEAN DEFAULT TRUE
+            )
+        ''')
         logger.info("База даних ініціалізована успішно.")
     except Exception as e:
         logger.error(f"Помилка ініціалізації бази даних: {e}")
@@ -149,7 +104,6 @@ async def init_db():
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Завантаження модераторів із бази даних
 async def load_moderators():
@@ -171,7 +125,6 @@ async def load_moderators():
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Додавання модератора до бази даних
 async def add_moderator_to_db(user_id: int, username: str = None):
@@ -195,7 +148,6 @@ async def add_moderator_to_db(user_id: int, username: str = None):
         if 'conn' in locals():
             await conn.close()
 
-
 # Видалення модератора з бази даних
 async def remove_moderator_from_db(user_id: int):
     try:
@@ -214,7 +166,6 @@ async def remove_moderator_from_db(user_id: int):
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Перевірка, чи є користувач модератором
 async def is_moderator(user_id: int) -> bool:
@@ -236,7 +187,6 @@ async def is_moderator(user_id: int) -> bool:
         if 'conn' in locals():
             await conn.close()
 
-
 # Отримання username модератора
 async def get_moderator_username(user_id: int) -> str | None:
     try:
@@ -257,7 +207,6 @@ async def get_moderator_username(user_id: int) -> str | None:
         if 'conn' in locals():
             await conn.close()
 
-
 # Додавання попередження
 async def add_warning(user_id: int, chat_id: int) -> int:
     try:
@@ -270,12 +219,12 @@ async def add_warning(user_id: int, chat_id: int) -> int:
             ssl=ssl_context if DB_SSLMODE == 'require' else None
         )
         warn_count = await conn.fetchval('''
-                                         INSERT INTO warnings (user_id, chat_id, warn_count)
-                                         VALUES ($1, $2, 1) ON CONFLICT (user_id, chat_id)
-            DO
-                                         UPDATE SET warn_count = warnings.warn_count + 1
-                                             RETURNING warn_count
-                                         ''', user_id, chat_id)
+            INSERT INTO warnings (user_id, chat_id, warn_count)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (user_id, chat_id)
+            DO UPDATE SET warn_count = warnings.warn_count + 1
+            RETURNING warn_count
+        ''', user_id, chat_id)
         logger.info(f"Додано попередження: user_id={user_id}, chat_id={chat_id}, warn_count={warn_count}")
         return warn_count
     except Exception as e:
@@ -284,7 +233,6 @@ async def add_warning(user_id: int, chat_id: int) -> int:
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Зняття попередження
 async def remove_warning(user_id: int, chat_id: int) -> int:
@@ -298,12 +246,11 @@ async def remove_warning(user_id: int, chat_id: int) -> int:
             ssl=ssl_context if DB_SSLMODE == 'require' else None
         )
         warn_count = await conn.fetchval('''
-                                         UPDATE warnings
-                                         SET warn_count = warn_count - 1
-                                         WHERE user_id = $1
-                                           AND chat_id = $2
-                                           AND warn_count > 0 RETURNING warn_count
-                                         ''', user_id, chat_id)
+            UPDATE warnings
+            SET warn_count = warn_count - 1
+            WHERE user_id = $1 AND chat_id = $2 AND warn_count > 0
+            RETURNING warn_count
+        ''', user_id, chat_id)
         if warn_count is None:
             return 0
         if warn_count == 0:
@@ -316,7 +263,6 @@ async def remove_warning(user_id: int, chat_id: int) -> int:
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Додавання бана
 async def add_ban(user_id: int, chat_id: int, reason: str):
@@ -340,7 +286,6 @@ async def add_ban(user_id: int, chat_id: int, reason: str):
         if 'conn' in locals():
             await conn.close()
 
-
 # Зняття бана
 async def remove_ban(user_id: int, chat_id: int):
     try:
@@ -359,7 +304,6 @@ async def remove_ban(user_id: int, chat_id: int):
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Отримання кількості попереджень
 async def get_warning_count(user_id: int, chat_id: int) -> int:
@@ -383,7 +327,6 @@ async def get_warning_count(user_id: int, chat_id: int) -> int:
         if 'conn' in locals():
             await conn.close()
 
-
 # Логування покарань
 async def log_punishment(user_id: int, chat_id: int, punishment_type: str, reason: str,
                          duration_minutes: int | None = None, moderator_id: int | None = None):
@@ -397,10 +340,9 @@ async def log_punishment(user_id: int, chat_id: int, punishment_type: str, reaso
             ssl=ssl_context if DB_SSLMODE == 'require' else None
         )
         await conn.execute('''
-                           INSERT INTO punishments (user_id, chat_id, punishment_type, reason, timestamp,
-                                                    duration_minutes, moderator_id)
-                           VALUES ($1, $2, $3, $4, NOW(), $5, $6)
-                           ''', user_id, chat_id, punishment_type, reason, duration_minutes, moderator_id)
+            INSERT INTO punishments (user_id, chat_id, punishment_type, reason, timestamp, duration_minutes, moderator_id)
+            VALUES ($1, $2, $3, $4, NOW(), $5, $6)
+        ''', user_id, chat_id, punishment_type, reason, duration_minutes, moderator_id)
         logger.info(
             f"Залоговано покарання: user_id={user_id}, chat_id={chat_id}, type={punishment_type}, reason={reason}, duration={duration_minutes}, moderator_id={moderator_id}")
     except Exception as e:
@@ -409,7 +351,6 @@ async def log_punishment(user_id: int, chat_id: int, punishment_type: str, reaso
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Отримання історії покарань
 async def get_punishments(user_id: int, chat_id: int) -> list:
@@ -423,12 +364,11 @@ async def get_punishments(user_id: int, chat_id: int) -> list:
             ssl=ssl_context if DB_SSLMODE == 'require' else None
         )
         rows = await conn.fetch('''
-                                SELECT punishment_type, reason, timestamp, duration_minutes, moderator_id
-                                FROM punishments
-                                WHERE user_id = $1
-                                  AND chat_id = $2
-                                ORDER BY timestamp DESC
-                                ''', user_id, chat_id)
+            SELECT punishment_type, reason, timestamp, duration_minutes, moderator_id
+            FROM punishments
+            WHERE user_id = $1 AND chat_id = $2
+            ORDER BY timestamp DESC
+        ''', user_id, chat_id)
         logger.info(f"Отримано історію покарань для user_id={user_id}, chat_id={chat_id}: {len(rows)} записів")
         return [
             {
@@ -445,7 +385,6 @@ async def get_punishments(user_id: int, chat_id: int) -> list:
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Отримання статусу фільтра
 async def get_filter_status(chat_id: int) -> bool:
@@ -466,7 +405,6 @@ async def get_filter_status(chat_id: int) -> bool:
     finally:
         if 'conn' in locals():
             await conn.close()
-
 
 # Встановлення статусу фільтра
 async def set_filter_status(chat_id: int, enabled: bool):
@@ -490,7 +428,6 @@ async def set_filter_status(chat_id: int, enabled: bool):
         if 'conn' in locals():
             await conn.close()
 
-
 # Зчитування заборонених слів із файлу
 def load_forbidden_words(file_path='forbidden_words.txt'):
     try:
@@ -503,7 +440,6 @@ def load_forbidden_words(file_path='forbidden_words.txt'):
         logger.error(f"Помилка зчитування заборонених слів: {e}")
         return set()
 
-
 # Ініціалізація бота
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -512,7 +448,6 @@ dp = Dispatcher()
 FORBIDDEN_WORDS = load_forbidden_words()
 WELCOME_MESSAGE = True
 
-
 # Функція для екранування спеціальних символів у MarkdownV2
 def escape_markdown_v2(text: str) -> str:
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -520,20 +455,17 @@ def escape_markdown_v2(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
-
 def escape_markdown_v2_rules(text: str) -> str:
     special_chars = ['_', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
 
-
 def escape_markdown_v2_help(text: str) -> str:
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!', '>']
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
-
 
 # Функція для створення згадки користувача
 async def get_user_mention(user_id: int, chat_id: int) -> str | None:
@@ -554,7 +486,6 @@ async def get_user_mention(user_id: int, chat_id: int) -> str | None:
         logger.warning(f"Помилка при отриманні користувача {user_id} у чаті {chat_id}: {e}")
         return f"ID\\:{user_id}"
 
-
 # Функція для безпечного видалення повідомлення
 async def safe_delete_message(message: types.Message):
     try:
@@ -562,7 +493,6 @@ async def safe_delete_message(message: types.Message):
         logger.info(f"Видалено повідомлення: message_id={message.message_id}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
         logger.warning(f"Не вдалося видалити повідомлення {message.message_id}: {e}")
-
 
 # Функція для отримання user_id, username і причини
 async def get_user_data(message: types.Message, args: list) -> tuple[int, str | None, str] | None:
@@ -599,16 +529,13 @@ async def get_user_data(message: types.Message, args: list) -> tuple[int, str | 
     logger.error("Невірний формат команди: не вказано user_id або reply")
     return None
 
-
 # Перевірка прав модератора або адміністратора
-def has_moderator_privileges(user_id: int) -> bool:
-    return user_id in ADMIN_IDS or asyncio.run(is_moderator(user_id))
-
+async def has_moderator_privileges(user_id: int) -> bool:
+    return user_id in ADMIN_IDS or await is_moderator(user_id)
 
 # Перевірка, чи має користувач доступ до /get_users
 def is_allowed_user(user_id: int) -> bool:
     return user_id in ALLOWED_USER_IDS
-
 
 # Функція для отримання всіх учасників чату
 async def get_all_participants(chat_id: int) -> list:
@@ -644,12 +571,11 @@ async def get_all_participants(chat_id: int) -> list:
         logger.error(f"Помилка при отриманні учасників для чату {chat_id}: {str(e)}")
     return members
 
-
 # Обробники команд
 @dp.message(Command('welcome'))
 async def toggle_welcome(message: types.Message):
     global WELCOME_MESSAGE
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -664,10 +590,9 @@ async def toggle_welcome(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Змінено статус привітань: {status}")
 
-
 @dp.message(Command('filter'))
 async def toggle_filter(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -686,10 +611,9 @@ async def toggle_filter(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Змінено статус фільтрації заборонених слів для chat_id={chat_id}: {status}")
 
-
 @dp.message(Command('addmoder'))
 async def add_moderator(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -725,10 +649,9 @@ async def add_moderator(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Додано модератора: user_id={user_id}, username={username}, chat_id={message.chat.id}")
 
-
 @dp.message(Command('removemoder'))
 async def remove_moderator(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -764,10 +687,9 @@ async def remove_moderator(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Видалено модератора: user_id={user_id}, username={username}, chat_id={message.chat.id}")
 
-
 @dp.message(Command('kick'))
 async def kick_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -819,10 +741,9 @@ async def kick_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('warn'))
 async def warn_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -870,10 +791,9 @@ async def warn_user(message: types.Message):
         logger.info(
             f"Видано попередження: user_id={user_id}, username={username}, warn_count={warn_count}, reason={reason}, chat_id={message.chat.id}")
 
-
 @dp.message(Command('ban'))
 async def ban_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -926,10 +846,9 @@ async def ban_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('mute'))
 async def mute_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -997,10 +916,9 @@ async def mute_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('unmute'))
 async def unmute_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1043,10 +961,9 @@ async def unmute_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('unwarn'))
 async def unwarn_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1081,10 +998,9 @@ async def unwarn_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('unban'))
 async def unban_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1119,10 +1035,9 @@ async def unban_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('info'))
 async def info_user(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1203,10 +1118,9 @@ async def info_user(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('ad'))
 async def make_announcement(message: types.Message):
-    if not has_moderator_privileges(message.from_user.id):
+    if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1274,7 +1188,6 @@ async def make_announcement(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('get_users'))
 async def get_users(message: types.Message):
     if not is_allowed_user(message.from_user.id):
@@ -1315,7 +1228,6 @@ async def get_users(message: types.Message):
         if os.path.exists(filename):
             os.remove(filename)
 
-
 @dp.chat_member()
 async def welcome_new_member(update: ChatMemberUpdated):
     user = update.new_chat_member.user
@@ -1342,7 +1254,6 @@ async def welcome_new_member(update: ChatMemberUpdated):
                 logger.info(f"Відправлено дебаг-повідомлення для {user.id}")
             except Exception as debug_e:
                 logger.error(f"Помилка дебаг-повідомлення для {user.id}: {debug_e}")
-
 
 @dp.message(Command('rules'))
 async def show_rules(message: types.Message):
@@ -1382,10 +1293,9 @@ async def show_rules(message: types.Message):
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
-
 @dp.message(Command('help'))
 async def show_help(message: types.Message):
-    is_mod = has_moderator_privileges(message.from_user.id)
+    is_mod = await has_moderator_privileges(message.from_user.id)
     if is_mod:
         help_text = (
             "📚 Список доступних команд для модераторів/адміністраторів:\n\n"
@@ -1428,7 +1338,6 @@ async def show_help(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-
 
 @dp.message()
 async def filter_messages(message: types.Message):
@@ -1473,7 +1382,6 @@ async def filter_messages(message: types.Message):
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
             break
-
 
 async def main():
     await init_db()
