@@ -260,6 +260,7 @@ async def get_bot_chats():
     except Exception as e:
         logger.error(f"Помилка при отриманні чатів бота: {e}")
     logger.info(f"Знайдено {len(bot_chats)} чатів, де бот є адміністратором: {bot_chats}")
+
     return bot_chats
 
 # Функція для перевірки, чи є користувач у чаті
