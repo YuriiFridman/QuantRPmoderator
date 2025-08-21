@@ -187,19 +187,6 @@ async def is_moderator(user_id: int) -> bool:
         if 'conn' in locals():
             await conn.close()
 
-@dp.message(Command('test_admin'))
-async def test_admin(message: types.Message):
-    if not await has_moderator_privileges(message.from_user.id):
-        await message.reply("Ви не маєте прав для виконання цієї команди.")
-        return
-    try:
-        bot_id = (await bot.get_me()).id
-        chat_id = message.chat.id
-        chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
-        await message.reply(f"Статус бота в чаті {chat_id}: {chat_member.status}")
-    except TelegramBadRequest as e:
-        await message.reply(f"Помилка перевірки статусу: {e}")
-
 # Отримання username модератора
 async def get_moderator_username(user_id: int) -> str | None:
     try:
@@ -676,6 +663,19 @@ async def toggle_welcome(message: types.Message):
     await asyncio.sleep(25)
     await safe_delete_message(reply)
     logger.info(f"Змінено статус привітань: {status}")
+
+@dp.message(Command('test_admin'))
+async def test_admin(message: types.Message):
+    if not await has_moderator_privileges(message.from_user.id):
+        await message.reply("Ви не маєте прав для виконання цієї команди.")
+        return
+    try:
+        bot_id = (await bot.get_me()).id
+        chat_id = message.chat.id
+        chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
+        await message.reply(f"Статус бота в чаті {chat_id}: {chat_member.status}")
+    except TelegramBadRequest as e:
+        await message.reply(f"Помилка перевірки статусу: {e}")
 
 @dp.message(Command('filter'))
 async def toggle_filter(message: types.Message):
