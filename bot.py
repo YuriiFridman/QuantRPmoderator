@@ -217,29 +217,42 @@ async def get_bot_chats():
     try:
         async with telethon_client:
             if not telethon_client.is_connected():
-                logger.error("Telethon клієнт не підключений. Перевірте сесію або авторизацію.")
-                return bot_chats
+                logger.error("Telethon клієнт не підключений. Спроба підключення...")
+                try:
+                    await telethon_client.connect()
+                    logger.info("Telethon клієнт успішно підключений")
+                except Exception as e:
+                    logger.error(f"Не вдалося підключити Telethon клієнт: {e}")
+                    return bot_chats
 
-            logger.info("Починаємо ітерацію діалогів...")
+            logger.debug("Починаємо ітерацію діалогів...")
+            dialog_count = 0
             async for dialog in telethon_client.iter_dialogs():
-                logger.debug(f"Отримано діалог: ID={dialog.entity.id}, Title={dialog.entity.title}, Type={type(dialog.entity)}")
+                dialog_count += 1
+                logger.debug(
+                    f"Діалог #{dialog_count}: ID={dialog.entity.id}, Title={getattr(dialog.entity, 'title', 'N/A')}, Type={type(dialog.entity).__name__}")
+
                 # Перевіряємо, чи це група або канал
-                if isinstance(dialog.entity, (Channel, Chat)) and dialog.entity.id < 0:
+                if hasattr(dialog.entity, 'id') and dialog.entity.id < 0:
                     try:
                         bot_id = (await bot.get_me()).id
                         logger.debug(f"Перевірка прав бота у чаті {dialog.entity.id}")
                         chat_member = await bot.get_chat_member(chat_id=dialog.entity.id, user_id=bot_id)
+                        logger.debug(f"Статус бота у чаті {dialog.entity.id}: {chat_member.status}")
                         if chat_member.status in ["administrator", "creator"]:
                             bot_chats.append(dialog.entity.id)
-                            logger.info(f"Додано чат до списку: ID={dialog.entity.id}, Title={dialog.entity.title}")
+                            logger.info(
+                                f"Додано чат до списку: ID={dialog.entity.id}, Title={getattr(dialog.entity, 'title', 'N/A')}")
                         else:
-                            logger.warning(f"Бот не є адміністратором у чаті {dialog.entity.id}: Status={chat_member.status}")
+                            logger.warning(
+                                f"Бот не є адміністратором у чаті {dialog.entity.id}: Status={chat_member.status}")
                     except TelegramBadRequest as e:
                         logger.warning(f"Помилка перевірки прав бота у чаті {dialog.entity.id}: {e}")
                     except Exception as e:
                         logger.error(f"Невідома помилка при перевірці чату {dialog.entity.id}: {e}")
                 else:
                     logger.debug(f"Пропущено діалог {dialog.entity.id}: Не є групою або каналом")
+            logger.info(f"Завершено ітерацію. Оброблено {dialog_count} діалогів.")
     except FloodWaitError as e:
         logger.warning(f"FloodWaitError: Потрібно зачекати {e.seconds} секунд")
         await asyncio.sleep(e.seconds)
