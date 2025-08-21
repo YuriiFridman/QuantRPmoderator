@@ -210,19 +210,43 @@ async def get_moderator_username(user_id: int) -> str | None:
 # Функція для отримання всіх груп, де є бот
 async def get_bot_chats():
     bot_chats = []
+    if not telethon_client:
+        logger.error("Telethon клієнт не ініціалізований. Перевірте API_ID, API_HASH, PHONE_NUMBER.")
+        return bot_chats
+
     try:
         async with telethon_client:
+            if not telethon_client.is_connected():
+                logger.error("Telethon клієнт не підключений. Перевірте сесію або авторизацію.")
+                return bot_chats
+
+            logger.info("Починаємо ітерацію діалогів...")
             async for dialog in telethon_client.iter_dialogs():
-                if isinstance(dialog.entity, (Channel, Chat)) and dialog.entity.id < 0:  # Групи мають негативний ID
+                logger.debug(f"Отримано діалог: ID={dialog.entity.id}, Title={dialog.entity.title}, Type={type(dialog.entity)}")
+                # Перевіряємо, чи це група або канал
+                if isinstance(dialog.entity, (Channel, Chat)) and dialog.entity.id < 0:
                     try:
-                        # Перевіряємо, чи бот є адміністратором у чаті
-                        chat_member = await bot.get_chat_member(chat_id=dialog.entity.id, user_id=(await bot.get_me()).id)
+                        bot_id = (await bot.get_me()).id
+                        logger.debug(f"Перевірка прав бота у чаті {dialog.entity.id}")
+                        chat_member = await bot.get_chat_member(chat_id=dialog.entity.id, user_id=bot_id)
                         if chat_member.status in ["administrator", "creator"]:
                             bot_chats.append(dialog.entity.id)
+                            logger.info(f"Додано чат до списку: ID={dialog.entity.id}, Title={dialog.entity.title}")
+                        else:
+                            logger.warning(f"Бот не є адміністратором у чаті {dialog.entity.id}: Status={chat_member.status}")
                     except TelegramBadRequest as e:
-                        logger.warning(f"Бот не є адміністратором у чаті {dialog.entity.id}: {e}")
+                        logger.warning(f"Помилка перевірки прав бота у чаті {dialog.entity.id}: {e}")
+                    except Exception as e:
+                        logger.error(f"Невідома помилка при перевірці чату {dialog.entity.id}: {e}")
+                else:
+                    logger.debug(f"Пропущено діалог {dialog.entity.id}: Не є групою або каналом")
+    except FloodWaitError as e:
+        logger.warning(f"FloodWaitError: Потрібно зачекати {e.seconds} секунд")
+        await asyncio.sleep(e.seconds)
+        return await get_bot_chats()  # Повторна спроба після затримки
     except Exception as e:
         logger.error(f"Помилка при отриманні чатів бота: {e}")
+    logger.info(f"Знайдено {len(bot_chats)} чатів, де бот є адміністратором: {bot_chats}")
     return bot_chats
 
 # Функція для перевірки, чи є користувач у чаті
