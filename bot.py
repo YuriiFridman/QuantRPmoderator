@@ -207,6 +207,37 @@ async def get_moderator_username(user_id: int) -> str | None:
         if 'conn' in locals():
             await conn.close()
 
+# Функція для отримання всіх груп, де є бот
+async def get_bot_chats():
+    bot_chats = []
+    try:
+        async with telethon_client:
+            async for dialog in telethon_client.iter_dialogs():
+                if isinstance(dialog.entity, (Channel, Chat)) and dialog.entity.id < 0:  # Групи мають негативний ID
+                    try:
+                        # Перевіряємо, чи бот є адміністратором у чаті
+                        chat_member = await bot.get_chat_member(chat_id=dialog.entity.id, user_id=(await bot.get_me()).id)
+                        if chat_member.status in ["administrator", "creator"]:
+                            bot_chats.append(dialog.entity.id)
+                    except TelegramBadRequest as e:
+                        logger.warning(f"Бот не є адміністратором у чаті {dialog.entity.id}: {e}")
+    except Exception as e:
+        logger.error(f"Помилка при отриманні чатів бота: {e}")
+    return bot_chats
+
+# Функція для перевірки, чи є користувач у чаті
+async def is_user_in_chat(chat_id: int, user_id: int) -> bool:
+    try:
+        async with telethon_client:
+            chat = await telethon_client.get_entity(chat_id)
+            async for participant in telethon_client.iter_participants(chat):
+                if participant.id == user_id:
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Помилка при перевірці присутності користувача {user_id} у чаті {chat_id}: {e}")
+        return False
+
 # Додавання попередження
 async def add_warning(user_id: int, chat_id: int) -> int:
     try:
@@ -709,6 +740,7 @@ async def kick_user(message: types.Message):
     user_id, username, reason = user_data
     mention = f"@{username}" if username else f"ID\\:{user_id}"
 
+    # Відтворення музики перед кік
     if os.path.exists(AUDIO_PATH):
         try:
             await bot.send_audio(
@@ -724,22 +756,51 @@ async def kick_user(message: types.Message):
     else:
         logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
 
+    # Кік із поточного чату
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
         await log_punishment(user_id, message.chat.id, "kick", reason, moderator_id=message.from_user.id)
-        text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату. Причина: {reason}.")
+        text = escape_markdown_v2(f"Користувач {mention} кікнутий з цього чату. Причина: {reason}.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
         logger.info(
             f"Кікнуто користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при кіку користувача {user_id}: {e}")
-        reply = await message.reply(f"Не вдалося кікнути користувача: {e.message}")
+        logger.error(f"Помилка при кіку користувача {user_id} з чату {message.chat.id}: {e}")
+        reply = await message.reply(f"Не вдалося кікнути користувача з цього чату: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
+        return
+
+    # Отримання всіх чатів, де є бот
+    bot_chats = await get_bot_chats()
+    logger.info(f"Знайдено {len(bot_chats)} чатів, де є бот: {bot_chats}")
+
+    # Перевірка та кік користувача з інших чатів
+    for chat_id in bot_chats:
+        if chat_id == message.chat.id:  # Пропускаємо поточний чат
+            continue
+        if await is_user_in_chat(chat_id, user_id):
+            try:
+                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=False)
+                await log_punishment(user_id, chat_id, "kick", f"Кік через команду в іншому чаті: {reason}", moderator_id=message.from_user.id)
+                logger.info(f"Кікнуто користувача {user_id} з чату {chat_id} за причиною: {reason}")
+                # Відправка повідомлення в інший чат
+                chat_mention = f"ID\\:{chat_id}"
+                try:
+                    chat = await bot.get_chat(chat_id)
+                    chat_mention = f"@{chat.username}" if chat.username else f"{chat.title}"
+                except TelegramBadRequest as e:
+                    logger.warning(f"Не вдалося отримати інформацію про чат {chat_id}: {e}")
+                text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату {chat_mention}. Причина: {reason}.")
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+            except TelegramBadRequest as e:
+                logger.error(f"Помилка при кіку користувача {user_id} з чату {chat_id}: {e}")
+                continue
+
+    await safe_delete_message(message)
+    await asyncio.sleep(25)
+    await safe_delete_message(reply)
 
 @dp.message(Command('warn'))
 async def warn_user(message: types.Message):
