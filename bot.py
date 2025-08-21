@@ -229,6 +229,7 @@ async def get_bot_chats():
             dialog_count = 0
             bot_id = (await bot.get_me()).id
             logger.debug(f"ID бота: {bot_id}")
+
             async for dialog in telethon_client.iter_dialogs():
                 dialog_count += 1
                 dialog_id = getattr(dialog.entity, 'id', None)
@@ -237,34 +238,48 @@ async def get_bot_chats():
                 logger.debug(f"Діалог #{dialog_count}: ID={dialog_id}, Title={dialog_title}, Type={dialog_type}")
 
                 # Перевіряємо, чи це група або канал
-                if hasattr(dialog.entity, 'id') and dialog.entity.id < 0:
-                    chat_id = dialog.entity.id
-                    # Для супергруп і каналів додаємо префікс -100, якщо потрібно
+                if hasattr(dialog.entity, 'id'):
+                    # Правильна конвертація ID з Telethon в aiogram формат
                     if isinstance(dialog.entity, Channel):
-                        chat_id = -1000000000000 - dialog.entity.id if dialog.entity.id > 0 else dialog.entity.id
-                    logger.debug(f"Обробка чату: ID={chat_id}, Original ID={dialog.entity.id}")
+                        # Для каналів та супергруп
+                        chat_id = int(-1000000000000 - dialog.entity.id)
+                    elif isinstance(dialog.entity, Chat):
+                        # Для звичайних груп
+                        chat_id = int(-dialog.entity.id)
+                    else:
+                        # Приватні чати - пропускаємо
+                        logger.debug(f"Пропущено приватний чат: ID={dialog_id}")
+                        continue
+
+                    logger.debug(f"Обробка чату: aiogram_ID={chat_id}, telethon_ID={dialog.entity.id}")
 
                     try:
                         chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
                         logger.debug(f"Статус бота у чаті {chat_id}: {chat_member.status}")
+
                         if chat_member.status in ["administrator", "creator"]:
                             bot_chats.append(chat_id)
                             logger.info(f"Додано чат до списку: ID={chat_id}, Title={dialog_title}")
                         else:
-                            logger.warning(f"Бот не є адміністратором у чаті {chat_id}: Status={chat_member.status}")
+                            logger.debug(f"Бот не є адміністратором у чаті {chat_id}: Status={chat_member.status}")
+
                     except TelegramBadRequest as e:
-                        logger.error(f"Помилка перевірки прав бота у чаті {chat_id}: {e}")
+                        if "chat not found" in str(e).lower():
+                            logger.debug(f"Чат {chat_id} не знайдено (можливо, бот не є учасником)")
+                        else:
+                            logger.error(f"Помилка перевірки прав бота у чаті {chat_id}: {e}")
                     except Exception as e:
                         logger.error(f"Невідома помилка при перевірці чату {chat_id}: {e}")
-                else:
-                    logger.debug(f"Пропущено діалог {dialog_id}: Не є групою або каналом")
+
             logger.info(f"Завершено ітерацію. Оброблено {dialog_count} діалогів.")
+
     except FloodWaitError as e:
         logger.warning(f"FloodWaitError: Потрібно зачекати {e.seconds} секунд")
         await asyncio.sleep(e.seconds)
         return await get_bot_chats()  # Повторна спроба після затримки
     except Exception as e:
         logger.error(f"Помилка при отриманні чатів бота: {e}")
+
     logger.info(f"Знайдено {len(bot_chats)} чатів, де бот є адміністратором: {bot_chats}")
     return bot_chats
 
