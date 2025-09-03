@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import logging
 import re
@@ -6,6 +7,7 @@ import datetime
 import asyncpg
 import ssl
 import certifi
+import redis
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ChatPermissions, ChatMemberUpdated
@@ -18,9 +20,15 @@ from telethon.errors import FloodWaitError
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
+
 # Налаштування логування
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+class DummyLogger:
+    def info(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def debug(self, *args, **kwargs): pass
+
+logger = DummyLogger()
 
 # Завантаження змінних з .env
 load_dotenv()
@@ -39,9 +47,25 @@ DB_NAME = os.getenv('DB_NAME', 'quantRPmoderator_db')
 DB_USER = os.getenv('DB_USER', 'neondb_owner')
 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 DB_SSLMODE = os.getenv('DB_SSLMODE', 'require')
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_DB = int(os.getenv('REDIS_DB', 0))
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
+
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, password=REDIS_PASSWORD, decode_responses=True, ssl=True)
 
 # Ініціалізація Telethon клієнта
 telethon_client = TelegramClient(SESSION_PATH, API_ID, API_HASH) if API_ID and API_HASH and PHONE_NUMBER else None
+
+@dataclass
+class ModerationTask:
+    task_type: str  # 'ban', 'kick', 'mute', 'warn'
+    user_id: int
+    username: Optional[str]
+    reason: str
+    chat_id: int
+    moderator_id: int
+    duration_minutes: Optional[int] = None
 
 # Ініціалізація бази даних PostgreSQL
 async def init_db():
@@ -208,6 +232,44 @@ async def get_moderator_username(user_id: int) -> str | None:
     finally:
         if 'conn' in locals():
             await conn.close()
+
+async def upsert_chat_settings(chat_id: int, chat_title: str = None, filter_enabled: bool = True):
+    try:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        if chat_title:  # оновлюємо тільки якщо є назва
+            await conn.execute(
+                '''
+                INSERT INTO chat_settings (chat_id, filter_enabled, chat_title)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (chat_id) DO UPDATE
+                    SET chat_title = EXCLUDED.chat_title,
+                        filter_enabled = EXCLUDED.filter_enabled
+                ''',
+                chat_id, filter_enabled, chat_title
+            )
+        else:  # не оновлюємо chat_title, якщо None
+            await conn.execute(
+                '''
+                INSERT INTO chat_settings (chat_id, filter_enabled)
+                VALUES ($1, $2)
+                ON CONFLICT (chat_id) DO UPDATE
+                    SET filter_enabled = EXCLUDED.filter_enabled
+                ''',
+                chat_id, filter_enabled
+            )
+    except Exception as e:
+        logger.error(f"Помилка запису chat_settings: {e}")
+    finally:
+        if 'conn' in locals():
+            await conn.close()
+
 
 # Функція для отримання всіх груп, де є бот
 async def get_bot_chats():
@@ -393,6 +455,27 @@ async def remove_ban(user_id: int, chat_id: int):
         if 'conn' in locals():
             await conn.close()
 
+async def remove_mute(user_id: int, chat_id: int):
+    try:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute(
+            "DELETE FROM punishments WHERE user_id = $1 AND chat_id = $2 AND punishment_type = 'mute'",
+            user_id, chat_id
+        )
+        logger.info(f"Знято мут: user_id={user_id}, chat_id={chat_id}")
+    except Exception as e:
+        logger.error(f"Помилка зняття мута: {e}")
+    finally:
+        if 'conn' in locals():
+            await conn.close()
+
 # Отримання кількості попереджень
 async def get_warning_count(user_id: int, chat_id: int) -> int:
     try:
@@ -462,7 +545,7 @@ async def get_punishments(user_id: int, chat_id: int) -> list:
             {
                 "type": row['punishment_type'],
                 "reason": row['reason'],
-                "timestamp": row['timestamp'].strftime('%Y-%m-%d %H:%M'),
+                "timestamp": row['timestamp'].strftime('%Y-%m-%d %H:%M') if row['timestamp'] is not None else "невідомо",
                 "duration_minutes": row['duration_minutes'],
                 "moderator_id": row['moderator_id']
             } for row in rows
@@ -554,6 +637,12 @@ def escape_markdown_v2_help(text: str) -> str:
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
+def add_task_to_queue(task: ModerationTask):
+    redis_client.rpush('moderation_queue', json.dumps(task.__dict__))
+
+def get_queue_length():
+    return redis_client.llen('moderation_queue')
 
 # Функція для створення згадки користувача
 async def get_user_mention(user_id: int, chat_id: int) -> str | None:
@@ -659,24 +748,6 @@ async def get_all_participants(chat_id: int) -> list:
         logger.error(f"Помилка при отриманні учасників для чату {chat_id}: {str(e)}")
     return members
 
-@dataclass
-class ModerationTask:
-    task_type: str
-    user_id: int
-    username: Optional[str]
-    reason: str
-    chat_id: int
-    moderator_id: int
-    message: object
-
-kick_queue = deque()
-ban_queue = deque()
-info_queue = deque()
-
-kick_processor_running = False
-ban_processor_running = False
-info_processor_running = False
-
 # Обробники команд
 @dp.message(Command('welcome'))
 async def toggle_welcome(message: types.Message):
@@ -729,6 +800,11 @@ async def toggle_filter(message: types.Message):
     await asyncio.sleep(25)
     await safe_delete_message(reply)
     logger.info(f"Змінено статус фільтрації заборонених слів для chat_id={chat_id}: {status}")
+
+async def ensure_all_chats_in_settings():
+    bot_chats = await get_bot_chats()
+    for chat_id in bot_chats:
+        await upsert_chat_settings(chat_id, filter_enabled=True)
 
 @dp.message(Command('addmoder'))
 async def add_moderator(message: types.Message):
@@ -806,623 +882,160 @@ async def remove_moderator(message: types.Message):
     await safe_delete_message(reply)
     logger.info(f"Видалено модератора: user_id={user_id}, username={username}, chat_id={message.chat.id}")
 
-
-async def process_kick_queue():
-    """Обробник черги для команд kick"""
-    global kick_processor_running
-    if kick_processor_running:
-        return
-
-    kick_processor_running = True
-
-    try:
-        while kick_queue:
-            task = kick_queue.popleft()
-            await execute_kick_task(task)
-            # Затримка між обробкою завдань для уникнення rate limit
-            await asyncio.sleep(2)
-    finally:
-        kick_processor_running = False
-
-
-async def process_info_queue():
-    """Обробник черги для команд info"""
-    global info_processor_running
-    if info_processor_running:
-        return
-
-    info_processor_running = True
-
-    try:
-        while info_queue:
-            task = info_queue.popleft()
-            await execute_info_task(task)
-            # Затримка між обробкою завдань для уникнення rate limit
-            await asyncio.sleep(3)
-    finally:
-        info_processor_running = False
-
-
-async def execute_kick_task(task: ModerationTask):
-    """Виконує завдання kick"""
-    user_id = task.user_id
-    username = task.username
-    reason = task.reason
-    chat_id = task.chat_id
-    moderator_id = task.moderator_id
-    message = task.message
-
-    mention = f"@{username}" if username else f"ID\\:{user_id}"
-
-    # Відтворення музики перед кік
-    if os.path.exists(AUDIO_PATH):
-        try:
-            await bot.send_audio(
-                chat_id=chat_id,
-                audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵 Причина: {reason}"),
-                parse_mode="MarkdownV2"
-            )
-            logger.info(f"Надіслано музику перед кік для user_id={user_id} у чаті {chat_id}")
-            await asyncio.sleep(25)
-        except TelegramBadRequest as e:
-            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
-    else:
-        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
-
-    # Кік із поточного чату
-    try:
-        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=False)
-        await log_punishment(user_id, chat_id, "kick", reason, moderator_id=moderator_id)
-        text = escape_markdown_v2(f"Користувач {mention} кікнутий з цього чату. Причина: {reason}.")
-        reply = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
-        logger.info(f"Кікнуто користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={chat_id}")
-
-        # Видалення повідомлення після затримки
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-
-    except TelegramBadRequest as e:
-        logger.error(f"Помилка при кіку користувача {user_id} з чату {chat_id}: {e}")
-        reply = await bot.send_message(chat_id=chat_id,
-                                       text=f"Не вдалося кікнути користувача з цього чату: {e.message}")
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        return
-
-    # Отримання всіх чатів, де є бот
-    bot_chats = await get_bot_chats()
-    logger.info(f"Знайдено {len(bot_chats)} чатів, де є бот: {bot_chats}")
-
-    # Перевірка та кік користувача з інших чатів
-    for other_chat_id in bot_chats:
-        if other_chat_id == chat_id:  # Пропускаємо поточний чат
-            continue
-        if await is_user_in_chat(other_chat_id, user_id):
-            try:
-                await bot.ban_chat_member(chat_id=other_chat_id, user_id=user_id, revoke_messages=False)
-                await log_punishment(user_id, other_chat_id, "kick", f"Кік через команду в іншому чаті: {reason}",
-                                     moderator_id=moderator_id)
-                logger.info(f"Кікнуто користувача {user_id} з чату {other_chat_id} за причиною: {reason}")
-
-                # Відправка повідомлення в інший чат
-                chat_mention = f"ID\\:{other_chat_id}"
-                try:
-                    chat = await bot.get_chat(other_chat_id)
-                    chat_mention = f"@{chat.username}" if chat.username else f"{chat.title}"
-                except TelegramBadRequest as e:
-                    logger.warning(f"Не вдалося отримати інформацію про чат {other_chat_id}: {e}")
-
-                text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату {chat_mention}. Причина: {reason}.")
-                await bot.send_message(chat_id=other_chat_id, text=text, parse_mode="MarkdownV2")
-
-                # Затримка між операціями для уникнення rate limit
-                await asyncio.sleep(1)
-
-            except TelegramBadRequest as e:
-                logger.error(f"Помилка при кіку користувача {user_id} з чату {other_chat_id}: {e}")
-                continue
-
-
-async def execute_ban_task(task: ModerationTask):
-    """Виконує завдання ban"""
-    user_id = task.user_id
-    username = task.username
-    reason = task.reason
-    chat_id = task.chat_id
-    moderator_id = task.moderator_id
-
-    mention = f"@{username}" if username else f"ID\\:{user_id}"
-
-    # Відтворення музики перед бан
-    if os.path.exists(AUDIO_PATH):
-        try:
-            await bot.send_audio(
-                chat_id=chat_id,
-                audio=types.FSInputFile(AUDIO_PATH),
-                caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
-                parse_mode="MarkdownV2"
-            )
-            logger.info(f"Надіслано музику перед бан для user_id={user_id} у чаті {chat_id}")
-            await asyncio.sleep(25)
-        except TelegramBadRequest as e:
-            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
-    else:
-        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
-
-    # Бан у поточному чаті
-    try:
-        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=False)
-        await add_ban(user_id, chat_id, reason)
-        await log_punishment(user_id, chat_id, "ban", reason, moderator_id=moderator_id)
-        text = escape_markdown_v2(f"Користувач {mention} забанений у цьому чаті. Причина: {reason}.")
-        reply = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
-        logger.info(f"Забанено користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={chat_id}")
-
-        # Видалення повідомлення після затримки
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-
-    except TelegramBadRequest as e:
-        logger.error(f"Помилка при бану користувача {user_id} у чаті {chat_id}: {e}")
-        reply = await bot.send_message(chat_id=chat_id,
-                                       text=f"Не вдалося забанить користувача у цьому чаті: {e.message}")
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        return
-
-    # Отримання всіх чатів, де є бот
-    bot_chats = await get_bot_chats()
-    logger.info(f"Знайдено {len(bot_chats)} чатів для бану, де є бот: {bot_chats}")
-
-    # Бан користувача в інших чатах
-    for other_chat_id in bot_chats:
-        if other_chat_id == chat_id:  # Пропускаємо поточний чат
-            continue
-        if await is_user_in_chat(other_chat_id, user_id):
-            try:
-                await bot.ban_chat_member(chat_id=other_chat_id, user_id=user_id, revoke_messages=False)
-                await add_ban(user_id, other_chat_id, f"Бан через команду в іншому чаті: {reason}")
-                await log_punishment(user_id, other_chat_id, "ban", f"Бан через команду в іншому чаті: {reason}",
-                                     moderator_id=moderator_id)
-                logger.info(f"Забанено користувача {user_id} в чаті {other_chat_id} за причиною: {reason}")
-
-                # Відправка повідомлення в інший чат
-                chat_mention = f"ID\\:{other_chat_id}"
-                try:
-                    chat = await bot.get_chat(other_chat_id)
-                    chat_mention = f"@{chat.username}" if chat.username else f"{chat.title}"
-                except TelegramBadRequest as e:
-                    logger.warning(f"Не вдалося отримати інформацію про чат {other_chat_id}: {e}")
-
-                text = escape_markdown_v2(f"Користувач {mention} забанений у чаті {chat_mention}. Причина: {reason}.")
-                await bot.send_message(chat_id=other_chat_id, text=text, parse_mode="MarkdownV2")
-
-                # Затримка між операціями для уникнення rate limit
-                await asyncio.sleep(1)
-            except TelegramBadRequest as e:
-                pass
-
-async def process_ban_queue():
-    """Обробник черги для команд ban"""
-    global ban_processor_running
-    if ban_processor_running:
-        return
-
-    ban_processor_running = True
-
-    try:
-        while ban_queue:
-            task = ban_queue.popleft()
-            await execute_ban_task(task)
-            # Затримка між обробкою завдань для уникнення rate limit
-            await asyncio.sleep(2)
-    finally:
-        ban_processor_running = False
-
-
-async def execute_info_task(task: ModerationTask):
-    """Виконує завдання info"""
-    username = task.username
-    chat_id = task.chat_id
-    message = task.message
-
-    try:
-        async with telethon_client:
-            try:
-                user = await telethon_client.get_entity(username)
-                user_id = user.id
-                logger.info(f"Отримано user_id={user_id} для username={username}")
-            except ValueError as e:
-                logger.error(f"Не вдалося знайти користувача за username={username}: {e}")
-                reply = await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Користувач @{escape_markdown_v2(username)} не знайдений\\.",
-                    parse_mode="MarkdownV2"
-                )
-                await asyncio.sleep(25)
-                await safe_delete_message(reply)
-                return
-
-        # Отримуємо історію покарань
-        punishments = await get_punishments(user_id, chat_id)
-        logger.info(
-            f"Запитано історію покарань: user_id={user_id}, chat_id={chat_id}, знайдено {len(punishments)} записів")
-
-        # Перевіряємо членство в поточному чаті
-        current_chat_status = "❌ Не є учасником"
-        try:
-            logger.info(f"Перевірка членства в чаті: user_id={user_id}, chat_id={chat_id}")
-            chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            logger.info(f"Отримано дані учасника: user_id={user_id}, status={chat_member.status}")
-
-            status_map = {
-                "creator": "👑 Власник",
-                "administrator": "🛡️ Адміністратор",
-                "member": "✅ Учасник",
-                "restricted": "🚫 Обмежений",
-                "left": "❌ Покинув чат",
-                "kicked": "🦵 Кікнутий"
-            }
-            current_chat_status = status_map.get(chat_member.status, f"🔸 {chat_member.status}")
-        except TelegramBadRequest as e:
-            logger.warning(f"Користувач user_id={user_id} не є учасником чату {chat_id} або виникла помилка: {e}")
-
-        # Отримуємо всі чати, де є бот
-        bot_chats = await get_bot_chats()
-        logger.info(f"Знайдено {len(bot_chats)} чатів для перевірки членства")
-
-        # Перевіряємо членство в інших чатах
-        chat_memberships = []
-        for other_chat_id in bot_chats:
-            if other_chat_id == chat_id:  # Поточний чат вже перевірили
-                continue
-
-            try:
-                if await is_user_in_chat(other_chat_id, user_id):
-                    # Отримуємо статус у цьому чаті
-                    try:
-                        chat_member = await bot.get_chat_member(chat_id=other_chat_id, user_id=user_id)
-                        status = status_map.get(chat_member.status, chat_member.status)
-                    except:
-                        status = "✅ Учасник"
-
-                    # Отримуємо назву чату
-                    chat_name = f"ID: {other_chat_id}"
-                    try:
-                        chat_info = await bot.get_chat(other_chat_id)
-                        if chat_info.title:
-                            chat_name = chat_info.title
-                        elif chat_info.username:
-                            chat_name = f"@{chat_info.username}"
-                    except:
-                        pass
-
-                    chat_memberships.append(f"• {escape_markdown_v2(chat_name)} \\- {status}")
-
-                # Затримка між перевірками чатів
-                await asyncio.sleep(0.5)
-
-            except Exception as e:
-                logger.error(f"Помилка при перевірці членства в чаті {other_chat_id}: {e}")
-                continue
-
-        # Формуємо список покарань
-        punishment_list = []
-        for p in punishments:
-            punishment_type = {
-                "kick": "🦵 Кік",
-                "ban": "🔨 Бан",
-                "warn": "⚠️ Попередження",
-                "mute": "🔇 Мут"
-            }.get(p["type"], p["type"])
-
-            duration = f" \\({p['duration_minutes']} хвилин\\)" if p['duration_minutes'] else ""
-            moderator_id = p["moderator_id"]
-
-            if moderator_id is None or not isinstance(moderator_id, int):
-                logger.warning(f"Некоректний moderator_id={moderator_id} для покарання user_id={user_id}")
-                moderator_mention = "Невідомий модератор"
-            else:
-                moderator_mention = await get_user_mention(moderator_id, chat_id) or f"ID: {moderator_id}"
-
-            # Екрануємо весь текст разом, включаючи вже екрановані дужки
-            reason_escaped = escape_markdown_v2(p['reason'])
-            moderator_escaped = escape_markdown_v2(str(moderator_mention))
-            timestamp_escaped = escape_markdown_v2(p['timestamp'])
-
-            punishment_text = f"{punishment_type}{duration}\nПричина: {reason_escaped}\nВидав: {moderator_escaped}\nДата: {timestamp_escaped}"
-            punishment_list.append(punishment_text)
-
-        # Формуємо повідомлення
-        escaped_username = escape_markdown_v2(username)
-        chat_count = len(chat_memberships)
-        punishment_count = len(punishment_list)
-
-        user_info = [
-            f"👤 **Інформація про користувача @{escaped_username}**",
-            f"🆔 **User ID:** `{user_id}`",
-            f"📍 **Статус у цьому чаті:** {current_chat_status}",
-            ""
-        ]
-
-        if chat_memberships:
-            user_info.extend([
-                f"🌐 **Членство в інших каналах/чатах \\({chat_count}\\):**",
-                *chat_memberships,
-                ""
-            ])
-        else:
-            user_info.extend([
-                "🌐 **Не є учасником інших відомих каналів/чатів**",
-                ""
-            ])
-
-        if punishment_list:
-            user_info.extend([
-                f"⚖️ **Історія покарань \\({punishment_count}\\):**",
-                *punishment_list
-            ])
-        else:
-            user_info.append("✅ **Покарань не знайдено**")
-
-        text = '\n'.join(user_info)
-        reply = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
-
-        logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={username}, chat_id={chat_id}")
-
-        # Видаляємо повідомлення після затримки
-        await asyncio.sleep(45)  # Даємо більше часу на читання
-        await safe_delete_message(reply)
-
-    except Exception as e:
-        logger.error(f"Загальна помилка обробки команди /info для username={username}: {e}")
-        escaped_username = escape_markdown_v2(username)
-        escaped_error = escape_markdown_v2(str(e))
-        reply = await bot.send_message(
-            chat_id=chat_id,
-            text=f"❌ Помилка при отриманні інформації про користувача @{escaped_username}: {escaped_error}",
-            parse_mode="MarkdownV2"
-        )
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-
-
 @dp.message(Command('kick'))
-async def kick_user(message: types.Message):
+async def cmd_kick(message: types.Message):
     if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
         reply = await message.reply(
-            "Будь ласка, вкажіть user_id і причину у форматі /kick 123456789 причина або відповідайте на повідомлення користувача з /kick причина.")
+            "Вкажіть user_id і причину у форматі /kick 123456789 причина або відповідайте на повідомлення."
+        )
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     user_id, username, reason = user_data
-
-    # Створюємо завдання та додаємо до черги
     task = ModerationTask(
         task_type="kick",
         user_id=user_id,
         username=username,
         reason=reason,
         chat_id=message.chat.id,
-        moderator_id=message.from_user.id,
-        message=message
+        moderator_id=message.from_user.id
     )
 
-    kick_queue.append(task)
-
-    # Повідомляємо про додавання до черги
-    queue_position = len(kick_queue)
-    reply = await message.reply(f"Завдання на кік користувача додано до черги. Позиція в черзі: {queue_position}")
+    add_task_to_queue(task)
+    queue_position = get_queue_length()
+    reply = await message.reply(f"Завдання на кік додано до черги. Позиція: {queue_position}")
     await safe_delete_message(message)
     await asyncio.sleep(10)
     await safe_delete_message(reply)
 
-    # Запускаємо обробник черги (якщо він ще не запущений)
-    asyncio.create_task(process_kick_queue())
 
 
 @dp.message(Command('ban'))
-async def ban_user(message: types.Message):
+async def cmd_ban(message: types.Message):
     if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
         reply = await message.reply(
-            "Будь ласка, вкажіть user_id і причину у форматі /ban 123456789 причина або відповідайте на повідомлення користувача з /ban причина.")
+            "Вкажіть user_id і причину у форматі /ban 123456789 причина або відповідайте на повідомлення."
+        )
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     user_id, username, reason = user_data
-
-    # Створюємо завдання та додаємо до черги
     task = ModerationTask(
         task_type="ban",
         user_id=user_id,
         username=username,
         reason=reason,
         chat_id=message.chat.id,
-        moderator_id=message.from_user.id,
-        message=message
+        moderator_id=message.from_user.id
     )
-
-    ban_queue.append(task)
-
-    # Повідомляємо про додавання до черги
-    queue_position = len(ban_queue)
-    reply = await message.reply(f"Завдання на бан користувача додано до черги. Позиція в черзі: {queue_position}")
+    add_task_to_queue(task)
+    queue_position = get_queue_length()
+    reply = await message.reply(f"Завдання на бан додано до черги. Позиція: {queue_position}")
     await safe_delete_message(message)
     await asyncio.sleep(10)
     await safe_delete_message(reply)
 
-
-@dp.message(Command('queue_status'))
-async def queue_status(message: types.Message):
-    if not await has_moderator_privileges(message.from_user.id):
-        reply = await message.reply("Ви не маєте прав для виконання цієї команди\\.")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        return
-
-    kick_count = len(kick_queue)
-    ban_count = len(ban_queue)
-    info_count = len(info_queue)
-    kick_status = "активний" if kick_processor_running else "неактивний"
-    ban_status = "активний" if ban_processor_running else "неактивний"
-    info_status = "активний" if info_processor_running else "неактивний"
-
-    status_text = (
-        f"📊 **Стан черг модерації:**\n"
-        f"🦵 Черга kick: {kick_count} завдань \\({kick_status}\\)\n"
-        f"🔨 Черга ban: {ban_count} завдань \\({ban_status}\\)\n"
-        f"🔍 Черга info: {info_count} завдань \\({info_status}\\)"
-    )
-
-    reply = await message.reply(status_text, parse_mode="MarkdownV2")
-    await safe_delete_message(message)
-    await asyncio.sleep(15)
-    await safe_delete_message(reply)
-
 @dp.message(Command('warn'))
-async def warn_user(message: types.Message):
+async def cmd_warn(message: types.Message):
     if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     args = message.text.split()[1:]
     user_data = await get_user_data(message, args)
     if not user_data:
         reply = await message.reply(
-            "Будь ласка, вкажіть user_id і причину у форматі /warn 123456789 причина або відповідайте на повідомлення користувача з /warn причина.")
+            "Вкажіть user_id і причину у форматі /warn 123456789 причина або відповідайте на повідомлення."
+        )
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     user_id, username, reason = user_data
-    warn_count = await add_warning(user_id, message.chat.id)
-    mention = f"@{username}" if username else f"ID\\:{user_id}"
-    await log_punishment(user_id, message.chat.id, "warn", reason, moderator_id=message.from_user.id)
-    if warn_count >= 3:
-        try:
-            await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=False)
-            await log_punishment(user_id, message.chat.id, "kick", "3 попередження", moderator_id=message.from_user.id)
-            text = escape_markdown_v2(
-                f"Користувач {mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
-            reply = await message.reply(text, parse_mode="MarkdownV2")
-            await safe_delete_message(message)
-            await asyncio.sleep(25)
-            await safe_delete_message(reply)
-            logger.info(
-                f"Кікнуто за 3 попередження: user_id={user_id}, username={username}, reason={reason}, chat_id={message.chat.id}")
-        except TelegramBadRequest as e:
-            logger.error(f"Помилка при кіку користувача {user_id}: {e}")
-            reply = await message.reply(f"Не вдалося кікнути користувача: {e.message}")
-            await safe_delete_message(message)
-            await asyncio.sleep(25)
-            await safe_delete_message(reply)
-    else:
-        text = escape_markdown_v2(f"Користувач {mention} отримав попередження {warn_count}/3. Причина: {reason}.")
-        reply = await message.reply(text, parse_mode="MarkdownV2")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        logger.info(
-            f"Видано попередження: user_id={user_id}, username={username}, warn_count={warn_count}, reason={reason}, chat_id={message.chat.id}")
-
+    task = ModerationTask(
+        task_type="warn",
+        user_id=user_id,
+        username=username,
+        reason=reason,
+        chat_id=message.chat.id,
+        moderator_id=message.from_user.id
+    )
+    add_task_to_queue(task)
+    await safe_delete_message(message)
+    await asyncio.sleep(10)
 
 @dp.message(Command('mute'))
-async def mute_user(message: types.Message):
+async def cmd_mute(message: types.Message):
     if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     args = message.text.split()[1:]
     minutes = None
     reason = None
     if len(args) >= 3 and re.match(r'^\d+$', args[0]) and args[1].isdigit():
-        user_id = args[0]
+        user_id = int(args[0])
         minutes = int(args[1])
         reason = ' '.join(args[2:])
     elif message.reply_to_message and len(args) >= 2 and args[0].isdigit():
-        user_id = None
+        user_id = message.reply_to_message.from_user.id
         minutes = int(args[0])
         reason = ' '.join(args[1:])
     else:
         reply = await message.reply(
-            "Будь ласка, вкажіть user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача з /mute 60 причина.")
+            "Вкажіть user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення."
+        )
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     user_data = await get_user_data(message, args if user_id else args[1:])
     if not user_data:
-        reply = await message.reply(
-            "Будь ласка, вкажіть коректний user_id, час у хвилинах і причину у форматі /mute 123456789 60 причина або відповідайте на повідомлення користувача.")
+        reply = await message.reply("Вкажіть коректний user_id, час і причину.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
         return
-
     user_id_from_data, username, _ = user_data
-    user_id = user_id_from_data if user_id_from_data else message.reply_to_message.from_user.id
+    user_id = user_id_from_data if user_id_from_data else user_id
+    task = ModerationTask(
+        task_type="mute",
+        user_id=user_id,
+        username=username,
+        reason=reason,
+        chat_id=message.chat.id,
+        moderator_id=message.from_user.id,
+        duration_minutes=minutes
+    )
+    add_task_to_queue(task)
+    queue_position = get_queue_length()
+    reply = await message.reply(f"Завдання на мут додано до черги. Позиція: {queue_position}")
+    await safe_delete_message(message)
+    await asyncio.sleep(10)
+    await safe_delete_message(reply)
 
-    try:
-        mute_until = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
-        await bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=user_id,
-            permissions=ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_polls=False,
-                can_send_other_messages=False
-            ),
-            until_date=mute_until
-        )
-        await log_punishment(user_id, message.chat.id, "mute", reason, duration_minutes=minutes,
-                             moderator_id=message.from_user.id)
-        mention = f"@{username}" if username else f"ID\\:{user_id}"
-        text = escape_markdown_v2(f"Користувач {mention} отримав мут на {minutes} хвилин. Причина: {reason}.")
-        reply = await message.reply(text, parse_mode="MarkdownV2")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
-        logger.info(
-            f"Видано мут: user_id={user_id}, username={username}, minutes={minutes}, reason={reason}, chat_id={message.chat.id}")
-    except TelegramBadRequest as e:
-        logger.error(f"Помилка при муті користувача {user_id}: {e}")
-        reply = await message.reply(f"Не вдалося видати мут: {e.message}")
-        await safe_delete_message(message)
-        await asyncio.sleep(25)
-        await safe_delete_message(reply)
 
 @dp.message(Command('unmute'))
 async def unmute_user(message: types.Message):
@@ -1461,9 +1074,7 @@ async def unmute_user(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Знято мут: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при знятті мута користувача {user_id}: {e}")
         reply = await message.reply(f"Не вдалося зняти мут: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1497,8 +1108,6 @@ async def unwarn_user(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(
-            f"Знято попередження: user_id={user_id}, username={username}, warn_count={warn_count}, chat_id={message.chat.id}")
     else:
         text = escape_markdown_v2(f"У користувача {mention} немає попереджень.")
         reply = await message.reply(text, parse_mode="MarkdownV2")
@@ -1535,9 +1144,7 @@ async def unban_user(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Знято бан: user_id={user_id}, username={username}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при знятті бана користувача {user_id}: {e}")
         reply = await message.reply(f"Не вдалося зняти бан: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1545,7 +1152,7 @@ async def unban_user(message: types.Message):
 
 
 @dp.message(Command('info'))
-async def info_user(message: types.Message):
+async def cmd_info(message: types.Message):
     if not await has_moderator_privileges(message.from_user.id):
         reply = await message.reply("Ви не маєте прав для виконання цієї команди.")
         await safe_delete_message(message)
@@ -1555,7 +1162,7 @@ async def info_user(message: types.Message):
 
     args = message.text.split()
     if len(args) != 2 or not args[1].startswith('@'):
-        reply = await message.reply("Будь ласка, вкажіть username у форматі /info @username.")
+        reply = await message.reply("Вкажіть username у форматі /info @username.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
@@ -1566,28 +1173,18 @@ async def info_user(message: types.Message):
     # Створюємо завдання та додаємо до черги
     task = ModerationTask(
         task_type="info",
-        user_id=0,  # Буде отримано в execute_info_task
+        user_id=0,  # визначає worker
         username=username,
-        reason="",  # Не потрібно для info
+        reason="",
         chat_id=message.chat.id,
-        moderator_id=message.from_user.id,
-        message=message
+        moderator_id=message.from_user.id
     )
-
-    info_queue.append(task)
-
-    # Повідомляємо про додавання до черги
-    queue_position = len(info_queue)
-    reply = await message.reply(f"🔍 Запит інформації про @{username} додано до черги. Позиція: {queue_position}")
+    add_task_to_queue(task)
+    queue_position = get_queue_length()
+    reply = await message.reply(f"Запит info про @{username} додано до черги. Позиція: {queue_position}")
     await safe_delete_message(message)
     await asyncio.sleep(10)
     await safe_delete_message(reply)
-
-    # Запускаємо обробник черги (якщо він ще не запущений)
-    asyncio.create_task(process_info_queue())
-
-    # Запускаємо обробник черги (якщо він ще не запущений)
-    asyncio.create_task(process_ban_queue())
 
 @dp.message(Command('ad'))
 async def make_announcement(message: types.Message):
@@ -1637,7 +1234,6 @@ async def make_announcement(message: types.Message):
             message_id=sent_message.message_id,
             disable_notification=False
         )
-        logger.info(f"Надіслано та закріплено перше оголошення в чаті {chat_id} з {len(first_chunk)} згадками")
 
         for chunk in participant_chunks[1:]:
             mentions = ' '.join(chunk)
@@ -1649,11 +1245,9 @@ async def make_announcement(message: types.Message):
                     parse_mode="MarkdownV2",
                     disable_notification=True
                 )
-                logger.info(f"Надіслано додаткове повідомлення з {len(chunk)} згадками в чаті {chat_id}")
                 await asyncio.sleep(4)
         await safe_delete_message(message)
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при надсиланні/закріпленні оголошення в чаті {chat_id}: {e}")
         reply = await message.reply(f"Не вдалося надіслати або закріпити оголошення: {e.message}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1688,9 +1282,7 @@ async def get_users(message: types.Message):
             caption=escape_markdown_v2("Список учасників чату"),
             parse_mode="MarkdownV2"
         )
-        logger.info(f"Надіслано список учасників для чату {chat_id}")
     except Exception as e:
-        logger.error(f"Помилка при надсиланні списку учасників для чату {chat_id}: {str(e)}")
         reply = await message.reply(f"Помилка: {str(e)}")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1718,13 +1310,9 @@ async def welcome_new_member(update: ChatMemberUpdated):
                 text=text,
                 parse_mode="MarkdownV2"
             )
-            logger.info(f"Відправлено привітання для {user.id} у чаті {update.chat.id}")
-        except TelegramBadRequest as e:
-            logger.error(f"Помилка при відправці привітання для {user.id}: {e}")
-            try:
-                logger.info(f"Відправлено дебаг-повідомлення для {user.id}")
-            except Exception as debug_e:
-                logger.error(f"Помилка дебаг-повідомлення для {user.id}: {debug_e}")
+        except Exception as e:
+            pass
+
 
 @dp.message(Command('rules'))
 async def show_rules(message: types.Message):
@@ -1756,9 +1344,7 @@ async def show_rules(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(f"Надіслано правила для user_id={message.from_user.id}, chat_id={message.chat.id}")
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при надсиланні правил для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні правил. Спробуйте ще раз.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
@@ -1801,17 +1387,47 @@ async def show_help(message: types.Message):
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
-        logger.info(
-            f"Надіслано список команд для user_id={message.from_user.id}, chat_id={message.chat.id}, is_moderator={is_mod}")
     except TelegramBadRequest as e:
-        logger.error(f"Помилка при надсиланні списку команд для user_id={message.from_user.id}: {e}")
         reply = await message.reply("Помилка при відображенні команд. Спробуйте ще раз.")
         await safe_delete_message(message)
         await asyncio.sleep(25)
         await safe_delete_message(reply)
 
+async def upsert_telegram_user(user: types.User):
+    try:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        if DB_SSLMODE == 'require':
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+        conn = await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+            ssl=ssl_context if DB_SSLMODE == 'require' else None
+        )
+        await conn.execute(
+            '''
+            INSERT INTO telegramuser (user_id, username, first_name, last_name, last_seen)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = $2,
+                first_name = $3,
+                last_name = $4,
+                last_seen = $5
+            ''',
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            datetime.datetime.utcnow()
+        )
+    except Exception as e:
+        logger.error(f"Помилка запису telegramuser: {e}")
+    finally:
+        if 'conn' in locals():
+            await conn.close()
+
 @dp.message()
 async def filter_messages(message: types.Message):
+    await upsert_telegram_user(message.from_user)
     chat_id = message.chat.id
     if not await get_filter_status(chat_id) or not message.text:
         return
@@ -1842,9 +1458,7 @@ async def filter_messages(message: types.Message):
                 await safe_delete_message(message)
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
-                logger.info(f"Користувач {message.from_user.id} отримав мут за слово '{word}' у чаті {chat_id}")
             except TelegramBadRequest as e:
-                logger.error(f"Помилка при муті користувача {message.from_user.id}: {e}")
                 mention = await get_user_mention(message.from_user.id,
                                                  message.chat.id) or f"User {message.from_user.id}"
                 error_text = escape_markdown_v2(f"Помилка при видачі мута для {mention}: {str(e)}")
@@ -1853,6 +1467,444 @@ async def filter_messages(message: types.Message):
                 await asyncio.sleep(25)
                 await safe_delete_message(reply)
             break
+
+async def moderation_worker():
+    while True:
+        raw_task = redis_client.blpop('moderation_queue', timeout=10)
+        if raw_task:
+            value = raw_task[1]
+            try:
+                task = ModerationTask(**json.loads(value))
+                if task.task_type == 'mute':
+                    await mute_user_action(task)
+                elif task.task_type == 'ban':
+                    await ban_user_action(task)
+                elif task.task_type == 'kick':
+                    await kick_user_action(task)
+                elif task.task_type == 'warn':
+                    await warn_user_action(task)
+                elif task.task_type == 'info':
+                    await info_user_action(task)
+                elif task.task_type == 'unban':
+                    await unban_user_action(task)
+                elif task.task_type == 'unmute':
+                    await unmute_user_action(task)
+                elif task.task_type == 'unwarn':
+                    await unwarn_user_action(task)
+            except Exception:
+                pass
+        else:
+            await asyncio.sleep(2)
+
+async def ban_user_action(task: ModerationTask):
+    user_id = task.user_id
+    username = task.username
+    reason = task.reason
+    chat_id = task.chat_id
+    moderator_id = task.moderator_id
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
+    AUDIO_PATH = "path/to/music.mp3"  # Вкажи правильний шлях
+
+    # Відтворення музики перед баном
+    if os.path.exists(AUDIO_PATH):
+        try:
+            await bot.send_audio(
+                chat_id=chat_id,
+                audio=types.FSInputFile(AUDIO_PATH),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує бан! 🎵 Причина: {reason}"),
+                parse_mode="MarkdownV2"
+            )
+            logger.info(f"Надіслано музику перед бан для user_id={user_id} у чаті {chat_id}")
+            await asyncio.sleep(25)
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
+    else:
+        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
+
+    # Бан у поточному чаті
+    try:
+        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=True)
+        await add_ban(user_id, chat_id, reason)
+        await log_punishment(user_id, chat_id, "ban", reason, moderator_id=moderator_id)
+        text = escape_markdown_v2(f"Користувач {mention} забанений у цьому чаті. Причина: {reason}.")
+        reply = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+        logger.info(f"Забанено користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={chat_id}")
+
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+
+    except TelegramBadRequest as e:
+        logger.error(f"Помилка при бану користувача {user_id} у чаті {chat_id}: {e}")
+        reply = await bot.send_message(
+            chat_id=chat_id,
+            text=escape_markdown_v2(f"Не вдалося забанити користувача у цьому чаті: {e.message}"),
+            parse_mode="MarkdownV2"
+        )
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    # Бан у всіх інших чатах, де є бот
+    bot_chats = await get_bot_chats()
+    logger.info(f"Знайдено {len(bot_chats)} чатів для бану, де є бот: {bot_chats}")
+
+    for other_chat_id in bot_chats:
+        if other_chat_id == chat_id:
+            continue
+        if await is_user_in_chat(other_chat_id, user_id):
+            try:
+                await bot.ban_chat_member(chat_id=other_chat_id, user_id=user_id, revoke_messages=True)
+                await add_ban(user_id, other_chat_id, f"Бан через команду в іншому чаті: {reason}")
+                await log_punishment(user_id, other_chat_id, "ban", f"Бан через команду в іншому чаті: {reason}", moderator_id=moderator_id)
+                logger.info(f"Забанено користувача {user_id} в чаті {other_chat_id} за причиною: {reason}")
+
+                # Відправка повідомлення в інший чат
+                chat_mention = f"ID\\:{other_chat_id}"
+                try:
+                    chat = await bot.get_chat(other_chat_id)
+                    chat_mention = f"@{chat.username}" if chat.username else f"{chat.title}"
+                except TelegramBadRequest as e:
+                    logger.warning(f"Не вдалося отримати інформацію про чат {other_chat_id}: {e}")
+
+                text = escape_markdown_v2(f"Користувач {mention} забанений у чаті {chat_mention}. Причина: {reason}.")
+                await bot.send_message(chat_id=other_chat_id, text=text, parse_mode="MarkdownV2")
+
+                await asyncio.sleep(1)
+            except TelegramBadRequest as e:
+                logger.error(f"Помилка при бану користувача {user_id} у чаті {other_chat_id}: {e}")
+                continue
+
+    logger.info(f"ban_user_action: user_id={user_id}, chat_id={chat_id}")
+
+async def kick_user_action(task: ModerationTask):
+    user_id = task.user_id
+    username = task.username
+    reason = task.reason
+    chat_id = task.chat_id
+    moderator_id = task.moderator_id
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
+    AUDIO_PATH = "path/to/music.mp3"  # Вкажи шлях до музики
+
+    # Відтворення музики перед кік
+    if os.path.exists(AUDIO_PATH):
+        try:
+            await bot.send_audio(
+                chat_id=chat_id,
+                audio=types.FSInputFile(AUDIO_PATH),
+                caption=escape_markdown_v2(f"Користувач {mention} отримує кік! 🎵 Причина: {reason}"),
+                parse_mode="MarkdownV2"
+            )
+            logger.info(f"Надіслано музику перед кік для user_id={user_id} у чаті {chat_id}")
+            await asyncio.sleep(25)
+        except TelegramBadRequest as e:
+            logger.error(f"Помилка при надсиланні музики для user_id={user_id}: {e}")
+    else:
+        logger.warning(f"Аудіофайл {AUDIO_PATH} не знайдено")
+
+    # Кік із поточного чату
+    try:
+        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=False)
+        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+        await log_punishment(user_id, chat_id, "kick", reason, moderator_id=moderator_id)
+        text = escape_markdown_v2(f"Користувач {mention} кікнутий з цього чату. Причина: {reason}.")
+        reply = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+        logger.info(f"Кікнуто користувача: user_id={user_id}, username={username}, reason={reason}, chat_id={chat_id}")
+
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+
+    except TelegramBadRequest as e:
+        logger.error(f"Помилка при кіку користувача {user_id} з чату {chat_id}: {e}")
+        reply = await bot.send_message(chat_id=chat_id,
+                                       text=escape_markdown_v2(f"Не вдалося кікнути користувача з цього чату: {e.message}"),
+                                       parse_mode="MarkdownV2")
+        await asyncio.sleep(25)
+        await safe_delete_message(reply)
+        return
+
+    # Кік з усіх інших чатів, де є бот
+    bot_chats = await get_bot_chats()
+    logger.info(f"Знайдено {len(bot_chats)} чатів, де є бот: {bot_chats}")
+
+    for other_chat_id in bot_chats:
+        if other_chat_id == chat_id:
+            continue
+        if await is_user_in_chat(other_chat_id, user_id):
+            try:
+                await bot.ban_chat_member(chat_id=other_chat_id, user_id=user_id, revoke_messages=False)
+                await bot.unban_chat_member(chat_id=other_chat_id, user_id=user_id)
+                await log_punishment(user_id, other_chat_id, "kick", f"Кік через команду в іншому чаті: {reason}", moderator_id=moderator_id)
+                logger.info(f"Кікнуто користувача {user_id} з чату {other_chat_id} за причиною: {reason}")
+
+                # Відправка повідомлення в інший чат
+                chat_mention = f"ID\\:{other_chat_id}"
+                try:
+                    chat = await bot.get_chat(other_chat_id)
+                    chat_mention = f"@{chat.username}" if chat.username else f"{chat.title}"
+                except TelegramBadRequest as e:
+                    logger.warning(f"Не вдалося отримати інформацію про чат {other_chat_id}: {e}")
+
+                text = escape_markdown_v2(f"Користувач {mention} кікнутий з чату {chat_mention}. Причина: {reason}.")
+                await bot.send_message(chat_id=other_chat_id, text=text, parse_mode="MarkdownV2")
+
+                await asyncio.sleep(1)
+
+            except TelegramBadRequest as e:
+                logger.error(f"Помилка при кіку користувача {user_id} з чату {other_chat_id}: {e}")
+                continue
+
+    logger.info(f"kick_user_action: user_id={user_id}, chat_id={chat_id}")
+
+async def mute_user_action(task: ModerationTask):
+    user_id = task.user_id
+    username = task.username
+    reason = task.reason
+    chat_id = task.chat_id
+    moderator_id = task.moderator_id
+    duration = task.duration_minutes or 60
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
+    mute_until = datetime.datetime.now() + datetime.timedelta(minutes=duration)
+
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False
+            ),
+            until_date=mute_until
+        )
+        await log_punishment(user_id, chat_id, "mute", reason, duration_minutes=duration, moderator_id=moderator_id)
+        text = escape_markdown_v2(f"Користувач {mention} отримав мут на {duration} хвилин. Причина: {reason}.")
+    except TelegramBadRequest as e:
+        text = escape_markdown_v2(f"Не вдалося зам'ютити користувача: {e.message}")
+
+    reply = await bot.send_message(chat_id, text, parse_mode="MarkdownV2")
+    await asyncio.sleep(25)
+    await safe_delete_message(reply)
+    logger.info(f"mute_user_action: user_id={user_id}, duration={duration}, chat_id={chat_id}")
+
+
+async def warn_user_action(task: ModerationTask):
+    user_id = task.user_id
+    username = task.username
+    reason = task.reason
+    chat_id = task.chat_id
+    moderator_id = task.moderator_id
+    mention = f"@{username}" if username else f"ID\\:{user_id}"
+
+    warn_count = await add_warning(user_id, chat_id)
+    await log_punishment(user_id, chat_id, "warn", reason, moderator_id=moderator_id)
+
+    if warn_count >= 3:
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, revoke_messages=False)
+            await log_punishment(user_id, chat_id, "kick", "3 попередження", moderator_id=moderator_id)
+            text = escape_markdown_v2(f"Користувач {mention} отримав 3/3 попередження і кікнутий з чату. Причина: {reason}.")
+        except TelegramBadRequest as e:
+            text = escape_markdown_v2(f"Не вдалося кікнути користувача: {e.message}")
+    else:
+        text = escape_markdown_v2(f"Користувач {mention} отримав попередження {warn_count}/3. Причина: {reason}.")
+    reply = await bot.send_message(chat_id, text, parse_mode="MarkdownV2")
+    await asyncio.sleep(25)
+    await safe_delete_message(reply)
+    logger.info(f"warn_user_action: user_id={user_id}, warn_count={warn_count}, chat_id={chat_id}")
+
+
+async def info_user_action(task: ModerationTask):
+    try:
+        async with telethon_client:
+            # 1. Отримати user_id по username
+            try:
+                user = await telethon_client.get_entity(task.username)
+                user_id = user.id
+                logger.info(f"Отримано user_id={user_id} для username={task.username}")
+            except ValueError as e:
+                reply_text = f"Користувач @{escape_markdown_v2(task.username)} не знайдений."
+                await bot.send_message(task.chat_id, reply_text, parse_mode="MarkdownV2")
+                return
+
+        # 2. Історія покарань саме для цього чату
+        punishments = await get_punishments(user_id, task.chat_id)
+        logger.info(f"Запитано історію покарань: user_id={user_id}, chat_id={task.chat_id}, знайдено {len(punishments)} записів")
+
+        # 3. Членство у поточному чаті
+        current_chat_status = "❌ Не є учасником"
+        status_map = {
+            "creator": "👑 Власник",
+            "administrator": "🛡️ Адміністратор",
+            "member": "✅ Учасник",
+            "restricted": "🚫 Обмежений",
+            "left": "❌ Покинув чат",
+            "kicked": "🦵 Кікнутий"
+        }
+        try:
+            chat_member = await bot.get_chat_member(chat_id=task.chat_id, user_id=user_id)
+            current_chat_status = status_map.get(chat_member.status, f"🔸 {chat_member.status}")
+        except TelegramBadRequest as e:
+            logger.warning(f"Користувач user_id={user_id} не є учасником чату {task.chat_id} або виникла помилка: {e}")
+
+        # 4. Членство в інших чатах
+        bot_chats = await get_bot_chats()
+        logger.info(f"Знайдено {len(bot_chats)} чатів для перевірки членства")
+        chat_memberships = []
+        for other_chat_id in bot_chats:
+            if other_chat_id == task.chat_id:
+                continue
+            try:
+                if await is_user_in_chat(other_chat_id, user_id):
+                    # Статус
+                    try:
+                        chat_member = await bot.get_chat_member(chat_id=other_chat_id, user_id=user_id)
+                        status = status_map.get(chat_member.status, chat_member.status)
+                    except:
+                        status = "✅ Учасник"
+                    # Назва чату
+                    chat_name = f"ID: {other_chat_id}"
+                    try:
+                        chat_info = await bot.get_chat(other_chat_id)
+                        if hasattr(chat_info, "title") and chat_info.title:
+                            chat_name = chat_info.title
+                        elif hasattr(chat_info, "username") and chat_info.username:
+                            chat_name = f"@{chat_info.username}"
+                    except:
+                        pass
+                    chat_memberships.append(f"• {escape_markdown_v2(chat_name)} \\- {status}")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Помилка при перевірці членства в чаті {other_chat_id}: {e}")
+                continue
+
+        # 5. Формування історії покарань
+        punishment_list = []
+        for p in punishments:
+            punishment_type = {
+                "kick": "🦵 Кік",
+                "ban": "🔨 Бан",
+                "warn": "⚠️ Попередження",
+                "mute": "🔇 Мут"
+            }.get(p["type"], p["type"])
+            duration = f" \\({p['duration_minutes']} хвилин\\)" if p['duration_minutes'] else ""
+            moderator_id = p["moderator_id"]
+            if moderator_id is None or not isinstance(moderator_id, int):
+                moderator_mention = "Невідомий модератор"
+            else:
+                moderator_mention = await get_user_mention(moderator_id, task.chat_id) or f"ID: {moderator_id}"
+            reason_escaped = escape_markdown_v2(p['reason'])
+            moderator_escaped = escape_markdown_v2(str(moderator_mention))
+            timestamp_escaped = escape_markdown_v2(p['timestamp'])
+            punishment_text = (
+                f"{punishment_type}{duration}\nПричина: {reason_escaped}\nВидав: {moderator_escaped}\nДата: {timestamp_escaped}"
+            )
+            punishment_list.append(punishment_text)
+
+        # 6. Формування повідомлення
+        escaped_username = escape_markdown_v2(task.username)
+        chat_count = len(chat_memberships)
+        punishment_count = len(punishment_list)
+        user_info = [
+            f"👤 **Інформація про користувача @{escaped_username}**",
+            f"🆔 **User ID:** `{user_id}`",
+            f"📍 **Статус у цьому чаті:** {current_chat_status}",
+            ""
+        ]
+        if chat_memberships:
+            user_info.extend([
+                f"🌐 **Членство в інших каналах/чатах \\({chat_count}\\):**",
+                *chat_memberships,
+                ""
+            ])
+        else:
+            user_info.extend([
+                "🌐 **Не є учасником інших відомих каналів/чатів**",
+                ""
+            ])
+        if punishment_list:
+            user_info.extend([
+                f"⚖️ **Історія покарань \\({punishment_count}\\):**",
+                *punishment_list
+            ])
+        else:
+            user_info.append("✅ **Покарань не знайдено**")
+
+        text = '\n'.join(user_info)
+        reply = await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+        logger.info(f"Надіслано інформацію про користувача: user_id={user_id}, username={task.username}, chat_id={task.chat_id}")
+        await asyncio.sleep(45)
+        await safe_delete_message(reply)
+
+    except Exception as e:
+        logger.error(f"Помилка info: {e}")
+        text = escape_markdown_v2(f"Помилка при отриманні info: {str(e)}")
+        await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+
+async def unban_user_action(task):
+    try:
+        await bot.unban_chat_member(chat_id=task.chat_id, user_id=task.user_id)
+        await remove_ban(task.user_id, task.chat_id)
+        mention = f"@{task.username}" if task.username else f"ID\\:{task.user_id}"
+        text = escape_markdown_v2(f"Знято бан із користувача {mention}.")
+        await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+    except TelegramBadRequest as e:
+        await bot.send_message(task.chat_id, f"Не вдалося зняти бан: {e.message}")
+
+async def unmute_user_action(task):
+    try:
+        await bot.restrict_chat_member(
+            chat_id=task.chat_id,
+            user_id=task.user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True
+            )
+        )
+        mention = f"@{task.username}" if task.username else f"ID\\:{task.user_id}"
+        text = escape_markdown_v2(f"Знято мут із користувача {mention}.")
+        await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+        await remove_mute(task.user_id, task.chat_id)
+    except TelegramBadRequest as e:
+        await bot.send_message(task.chat_id, f"Не вдалося зняти мут: {e.message}")
+
+async def unwarn_user_action(task):
+    warn_count = await remove_warning(task.user_id, task.chat_id)
+    mention = f"@{task.username}" if task.username else f"ID\\:{task.user_id}"
+    if warn_count >= 0:
+        text = escape_markdown_v2(f"Знято попередження з користувача {mention}. Залишилось {warn_count}/3.")
+        await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+    else:
+        text = escape_markdown_v2(f"У користувача {mention} немає попереджень.")
+        await bot.send_message(task.chat_id, text, parse_mode="MarkdownV2")
+
+async def update_all_chat_titles(bot):
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    if DB_SSLMODE == 'require':
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+    conn = await asyncpg.connect(
+        host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD,
+        ssl=ssl_context if DB_SSLMODE == 'require' else None
+    )
+
+    rows = await conn.fetch("SELECT chat_id FROM chat_settings")
+    for row in rows:
+        chat_id = row['chat_id']
+        try:
+            chat = await bot.get_chat(chat_id)
+            chat_title = chat.title
+            if chat_title:  # Обновляем только если есть название!
+                await conn.execute(
+                    "UPDATE chat_settings SET chat_title = $1 WHERE chat_id = $2",
+                    chat_title, chat_id
+                )
+        except Exception as e:
+            print(f"Не удалось получить название для {chat_id}: {e}")
+
+    await conn.close()
 
 async def main():
     await init_db()
@@ -1877,6 +1929,11 @@ async def main():
                 logger.error(f"Бот не є адміністратором у чаті {chat.id}. Обмежена функціональність.")
         except TelegramBadRequest as e:
             logger.error(f"Помилка перевірки прав бота: {e}")
+
+        await update_all_chat_titles(bot)
+        await ensure_all_chats_in_settings()
+        asyncio.create_task(moderation_worker())
+
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Критична помилка: {e}")
