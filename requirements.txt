@@ -4,4 +4,3 @@ telethon==1.36.0
 certifi
 asyncpg
 redis
-json
